@@ -468,8 +468,12 @@ jobs:
                   if resp.get("id") == msg_id:
                       return resp
 
-          # Find the chrome://extensions tab
+          # Find the chrome://extensions tab or navigate to it
           targets = cdp_http("/json/list") or []
+          print(f"  Available targets: {len(targets)}")
+          for t in targets:
+              print(f"    [{t.get('type','?')}] {t.get('url','?')}")
+
           ext_tab = None
           for t in targets:
               if "chrome://extensions" in t.get("url", ""):
@@ -477,11 +481,40 @@ jobs:
                   break
 
           if not ext_tab:
-              print("  Opening chrome://extensions tab...")
-              ext_tab = cdp_http("/json/new?chrome://extensions")
-              time.sleep(3)
+              # /json/new doesn't work for chrome:// URLs (405 error)
+              # Instead, find any page target and navigate it to chrome://extensions
+              print("  chrome://extensions tab not found, navigating existing tab...")
+              page_tab = None
+              for t in targets:
+                  if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                      page_tab = t
+                      break
+
+              if not page_tab:
+                  print("  ❌ No page target found to navigate")
+                  exit(1)
+
+              # Connect to the tab and navigate to chrome://extensions
+              nav_ws = websocket.create_connection(page_tab["webSocketDebuggerUrl"], timeout=15)
+              nav_msg = {"id": 1, "method": "Page.navigate", "params": {"url": "chrome://extensions"}}
+              nav_ws.send(json.dumps(nav_msg))
+              # Wait for navigation response
+              while True:
+                  r = json.loads(nav_ws.recv())
+                  if r.get("id") == 1:
+                      break
+              nav_ws.close()
+              time.sleep(5)
+
+              # Re-fetch targets to get the updated tab
+              targets = cdp_http("/json/list") or []
+              for t in targets:
+                  if "chrome://extensions" in t.get("url", ""):
+                      ext_tab = t
+                      break
+
               if not ext_tab:
-                  print("  ❌ Failed to open chrome://extensions")
+                  print("  ❌ Failed to navigate to chrome://extensions")
                   exit(1)
 
           ws_url = ext_tab.get("webSocketDebuggerUrl")
