@@ -254,20 +254,54 @@ jobs:
           # Download the extension zip from GitHub
           wget -q -O /tmp/real-botxbyte-extension.zip "https://github.com/user-attachments/files/25434058/real-botxbyte-extension.zip"
 
-          # Extract to home directory
-          unzip -o /tmp/real-botxbyte-extension.zip -d "$HOME/"
+          # Extract to a temp location first to handle nested directories
+          TEMP_EXTRACT="/tmp/extension-extract"
+          rm -rf "$TEMP_EXTRACT"
+          mkdir -p "$TEMP_EXTRACT"
+          unzip -o /tmp/real-botxbyte-extension.zip -d "$TEMP_EXTRACT"
           rm /tmp/real-botxbyte-extension.zip
 
-          # Verify extraction
-          if [ ! -d "$EXTENSION_DIR" ]; then
-            echo "❌ Extension directory not found after extraction"
-            echo "Contents of $HOME/:"
-            ls -la "$HOME/"
+          # Debug: show what was extracted
+          echo "Extracted contents:"
+          find "$TEMP_EXTRACT" -maxdepth 3 -type f | head -20
+
+          # Find where manifest.json actually is (handles nested directory from zip)
+          MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
+
+          if [ -z "$MANIFEST_PATH" ]; then
+            echo "❌ manifest.json not found in extracted zip!"
+            find "$TEMP_EXTRACT" -type f
             exit 1
           fi
 
+          ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
+          echo "Found manifest.json at: $MANIFEST_PATH"
+          echo "Extension root: $ACTUAL_EXT_DIR"
+
+          # Move the actual extension directory to the expected location
+          rm -rf "$EXTENSION_DIR"
+          mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
+          rm -rf "$TEMP_EXTRACT"
+
+          # Verify the extension structure
+          echo "Extension directory contents:"
+          ls -la "$EXTENSION_DIR/"
+
+          if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
+            echo "❌ manifest.json not found at $EXTENSION_DIR/manifest.json"
+            exit 1
+          fi
+
+          # Show manifest for debugging
+          echo "manifest.json contents:"
+          cat "$EXTENSION_DIR/manifest.json"
+
           # Install Python dependencies for server.py
-          pip install -r "$EXTENSION_DIR/requirements.txt"
+          if [ -f "$EXTENSION_DIR/requirements.txt" ]; then
+            pip install -r "$EXTENSION_DIR/requirements.txt"
+          else
+            echo "⚠️ No requirements.txt found, skipping pip install"
+          fi
 
           echo "✅ BotXByte Extension setup complete"
           echo "  Extension path: $EXTENSION_DIR"
@@ -311,11 +345,28 @@ jobs:
           export DISPLAY=:1
           export NO_AT_BRIDGE=1
 
+          # Suppress D-Bus errors in headless environment
+          export DBUS_SESSION_BUS_ADDRESS=/dev/null
+
           EXTENSION_DIR="$HOME/real-botxbyte-extension"
           CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
+
+          # Clean any previous profile to avoid stale state
+          rm -rf "$CHROME_PROFILE_DIR"
           mkdir -p "$CHROME_PROFILE_DIR"
 
-          # --- Enable developer mode via Chrome policy ---
+          # --- Verify extension directory has manifest.json ---
+          if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
+            echo "❌ Extension manifest.json not found at $EXTENSION_DIR/manifest.json"
+            echo "Directory contents:"
+            ls -laR "$EXTENSION_DIR/" 2>/dev/null || echo "Directory does not exist"
+            exit 1
+          fi
+
+          echo "Extension manifest version:"
+          python3 -c "import json; m=json.load(open('$EXTENSION_DIR/manifest.json')); print(f\"  Name: {m.get('name','?')}\"); print(f\"  Version: {m.get('version','?')}\"); print(f\"  Manifest V{m.get('manifest_version','?')}\")"
+
+          # --- Enable developer mode and extension loading via Chrome policy ---
           sudo mkdir -p /etc/opt/chrome/policies/managed
           echo '{
             "ExtensionSettings": {
@@ -324,20 +375,39 @@ jobs:
               }
             },
             "DeveloperToolsAvailability": 1,
-            "ExtensionDeveloperModeAllowed": true
+            "ExtensionDeveloperModeAllowed": true,
+            "BlockExternalExtensions": false
           }' | sudo tee /etc/opt/chrome/policies/managed/allow_dev_extensions.json > /dev/null
 
           # --- Pre-create profile preferences with developer_mode enabled ---
-          mkdir -p "$CHROME_PROFILE_DIR/Default"
-          echo '{
+          mkdir -p "$CHROME_PROFILE_DIR/Default/Extensions"
+          cat > "$CHROME_PROFILE_DIR/Default/Preferences" << 'PREFS_EOF'
+          {
             "extensions": {
               "ui": {
                 "developer_mode": true
               }
+            },
+            "browser": {
+              "has_seen_welcome_page": true,
+              "check_default_browser": false
+            },
+            "profile": {
+              "exited_cleanly": true,
+              "exit_type": "Normal"
             }
-          }' > "$CHROME_PROFILE_DIR/Default/Preferences"
+          }
+          PREFS_EOF
+
+          # Also create First Run sentinel so Chrome doesn't show first-run UI
+          touch "$CHROME_PROFILE_DIR/First Run"
+
+          echo "Launching Chrome..."
+          echo "  Extension dir: $EXTENSION_DIR"
+          echo "  Profile dir: $CHROME_PROFILE_DIR"
 
           # Launch Chrome with the unpacked extension loaded
+          # Redirect stderr to log file to avoid D-Bus noise in CI output
           google-chrome \
             --no-first-run \
             --no-default-browser-check \
@@ -348,18 +418,59 @@ jobs:
             --disable-extensions-except="$EXTENSION_DIR" \
             --load-extension="$EXTENSION_DIR" \
             --user-data-dir="$CHROME_PROFILE_DIR" \
+            --disable-background-networking \
+            --disable-client-side-phishing-detection \
+            --disable-sync \
+            --metrics-recording-only \
+            --no-default-browser-check \
+            --enable-logging=stderr \
+            --v=1 \
             --new-window \
-            "about:blank" &
+            "chrome://extensions" \
+            2>/tmp/chrome-stderr.log &
 
-          sleep 8
+          CHROME_PID=$!
+          echo "Chrome PID: $CHROME_PID"
+
+          # Wait for Chrome to fully initialize
+          sleep 10
 
           if pgrep -f "google-chrome" > /dev/null; then
+            echo "✅ Chrome is running"
+
+            # Check if extension was loaded by looking at the profile Extensions directory
+            EXT_COUNT=$(find "$CHROME_PROFILE_DIR/Default/Extensions" -name "manifest.json" 2>/dev/null | wc -l)
+            echo "  Extensions found in profile: $EXT_COUNT"
+
+            # Check Chrome logs for extension loading
+            if [ -f /tmp/chrome-stderr.log ]; then
+              echo "  Extension-related Chrome logs:"
+              grep -i "extension\|load.*unpack\|manifest" /tmp/chrome-stderr.log | tail -20 || echo "  (no extension logs found)"
+
+              # Check for extension loading errors
+              if grep -qi "error.*extension\|failed.*load.*extension\|manifest.*error" /tmp/chrome-stderr.log; then
+                echo "⚠️ Chrome reported extension loading errors:"
+                grep -i "error.*extension\|failed.*load\|manifest.*error" /tmp/chrome-stderr.log | tail -10
+              fi
+            fi
+
             echo "✅ Chrome launched with BotXByte extension (developer mode enabled)"
             echo "  Extension will auto-connect to ws://localhost:8765"
             echo "  Profile dir: $CHROME_PROFILE_DIR"
+
+            # Also verify server.py is still running
+            if pgrep -f "server.py" > /dev/null; then
+              echo "✅ BotXByte server is running"
+            else
+              echo "⚠️ BotXByte server is NOT running - extension won't be able to connect"
+              cat /tmp/botxbyte-server.log 2>/dev/null || true
+            fi
           else
             echo "❌ Chrome failed to launch"
-            cat /tmp/botxbyte-server.log || true
+            echo "Chrome stderr log:"
+            cat /tmp/chrome-stderr.log 2>/dev/null | tail -30 || true
+            echo "BotXByte server log:"
+            cat /tmp/botxbyte-server.log 2>/dev/null || true
             exit 1
           fi
 
@@ -549,8 +660,9 @@ jobs:
           export DISPLAY=:1
           export NO_AT_BRIDGE=1
           export SESSION_MANAGER=""
+          export DBUS_SESSION_BUS_ADDRESS=/dev/null
           sudo apt-get update
-          sudo apt-get install ffmpeg libavcodec-dev libavformat-dev libavdevice-dev libavutil-dev libavfilter-dev libswscale-dev libswresample-dev pkg-config
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg libavcodec-dev libavformat-dev libavdevice-dev libavutil-dev libavfilter-dev libswscale-dev libswresample-dev pkg-config
 
 
           # Run Moti in a visible terminal on the desktop
@@ -583,6 +695,7 @@ jobs:
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
           export PATH=$PATH:/opt/TurboVNC/bin
+          export DBUS_SESSION_BUS_ADDRESS=/dev/null
 
           echo "Keeping VNC session alive..."
 
@@ -648,6 +761,7 @@ jobs:
               echo "❌ Chrome stopped! Restarting..."
               export DISPLAY=:1
               export NO_AT_BRIDGE=1
+              export DBUS_SESSION_BUS_ADDRESS=/dev/null
               EXTENSION_DIR="$HOME/real-botxbyte-extension"
               CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
               google-chrome \
@@ -660,8 +774,12 @@ jobs:
                 --disable-extensions-except="$EXTENSION_DIR" \
                 --load-extension="$EXTENSION_DIR" \
                 --user-data-dir="$CHROME_PROFILE_DIR" \
+                --disable-background-networking \
+                --disable-client-side-phishing-detection \
+                --disable-sync \
                 --new-window \
-                "about:blank" &
+                "chrome://extensions" \
+                2>/tmp/chrome-stderr.log &
               sleep 5
               if pgrep -f "google-chrome" > /dev/null; then
                 echo "✅ Chrome restarted with BotXByte extension"
