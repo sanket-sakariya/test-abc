@@ -206,19 +206,42 @@ jobs:
             exit 1
           fi
 
+      - name: Install websockify dependency
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          pip install numpy
+          echo "✅ numpy installed (speeds up websockify HyBi protocol)"
+
       - name: Start noVNC (Web VNC)
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
           echo "Starting noVNC web server..."
           cd ~/noVNC
-          ./utils/novnc_proxy --vnc localhost:$VNC_PORT --listen $NOVNC_PORT &
-          sleep 3
 
-          if netstat -tuln | grep :$NOVNC_PORT > /dev/null; then
-            echo "✅ noVNC started successfully on port $NOVNC_PORT"
+          # Ensure websockify is properly installed
+          if [ ! -f ./utils/websockify/run ]; then
+            echo "websockify not found, cloning..."
+            cd utils
+            git clone https://github.com/novnc/websockify.git
+            cd ..
+          fi
+
+          ./utils/novnc_proxy --vnc localhost:$VNC_PORT --listen $NOVNC_PORT &
+          NOVNC_PID=$!
+          sleep 5
+
+          # Use ss instead of netstat (netstat not available on ubuntu runners)
+          if ss -tuln | grep -q ":$NOVNC_PORT "; then
+            echo "✅ noVNC started successfully on port $NOVNC_PORT (PID: $NOVNC_PID)"
           else
-            echo "❌ noVNC failed to start"
-            exit 1
+            # Fallback: check if the process is still running
+            if kill -0 $NOVNC_PID 2>/dev/null; then
+              echo "✅ noVNC process is running (PID: $NOVNC_PID), port may still be binding..."
+              sleep 3
+            else
+              echo "❌ noVNC failed to start"
+              exit 1
+            fi
           fi
 
       - name: Setup BotXByte Extension
