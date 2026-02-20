@@ -382,7 +382,6 @@ jobs:
           # --- Verify extension directory ---
           if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
             echo "❌ Extension manifest.json not found"
-            ls -laR "$EXTENSION_DIR/" 2>/dev/null || echo "Directory does not exist"
             exit 1
           fi
 
@@ -391,9 +390,6 @@ jobs:
 
           echo "Extension manifest:"
           python3 -c "import json; m=json.load(open('$EXTENSION_DIR/manifest.json')); print(f\"  Name: {m.get('name','?')}\"); print(f\"  Version: {m.get('version','?')}\"); print(f\"  Manifest V{m.get('manifest_version','?')}\")"
-
-          echo "Extension files:"
-          ls -1 "$EXTENSION_DIR/"
 
           # --- Chrome policy ---
           sudo mkdir -p /etc/opt/chrome/policies/managed
@@ -408,91 +404,179 @@ jobs:
             "BlockExternalExtensions": false
           }' | sudo tee /etc/opt/chrome/policies/managed/allow_dev_extensions.json > /dev/null
 
+          # Install websocket-client for CDP interaction
+          pip install websocket-client -q
+
           # ================================================================
-          # PHASE 1: Initialize Chrome profile (headless, no extension)
-          # This creates the profile with proper Secure Preferences HMACs
+          # PHASE 1: Launch Chrome WITHOUT extension, open chrome://extensions
           # ================================================================
-          echo "Phase 1: Initializing Chrome profile..."
+          echo "Phase 1: Launching Chrome (no extension yet)..."
           touch "$CHROME_PROFILE_DIR/First Run"
 
           google-chrome \
-            --headless=new \
             --no-first-run \
-            --no-sandbox \
+            --no-default-browser-check \
             --disable-gpu \
+            --no-sandbox \
             --disable-dev-shm-usage \
+            --enable-extensions \
             --user-data-dir="$CHROME_PROFILE_DIR" \
-            --dump-dom "about:blank" > /dev/null 2>&1 || true
+            --remote-debugging-port=9222 \
+            --new-window \
+            "chrome://extensions" \
+            2>/tmp/chrome-stderr.log &
 
-          sleep 3
+          CHROME_PID=$!
+          echo "  Chrome PID: $CHROME_PID"
+          sleep 10
 
-          # Kill headless Chrome
-          pkill -f "google-chrome" 2>/dev/null || true
-          sleep 2
-
-          echo "  Profile created. Files:"
-          ls -la "$CHROME_PROFILE_DIR/Default/" 2>/dev/null | head -10
+          if ! pgrep -f "google-chrome" > /dev/null; then
+            echo "❌ Chrome failed to launch"
+            tail -20 /tmp/chrome-stderr.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "  ✅ Chrome is running"
 
           # ================================================================
-          # PHASE 2: Enable developer mode in the initialized profile
-          # Delete Secure Preferences so Chrome re-hashes from Preferences
+          # PHASE 2: Use CDP WebSocket to click the developer mode toggle
+          # This goes through Chrome's own UI so Secure Preferences HMAC
+          # is computed correctly by Chrome itself - the ONLY reliable way
           # ================================================================
-          echo "Phase 2: Enabling developer mode in profile..."
+          echo "Phase 2: Enabling developer mode via CDP..."
 
           python3 << 'PYEOF'
-          import json, os, sys
+          import websocket
+          import json
+          import time
+          import urllib.request
 
-          profile_dir = os.path.expanduser("~/chrome-botxbyte-profile/Default")
-          prefs_file = os.path.join(profile_dir, "Preferences")
-          secure_prefs_file = os.path.join(profile_dir, "Secure Preferences")
+          def cdp_http(path):
+              try:
+                  resp = urllib.request.urlopen(f"http://localhost:9222{path}", timeout=10)
+                  return json.loads(resp.read())
+              except Exception as e:
+                  print(f"  CDP HTTP error: {e}")
+                  return None
 
-          # Read and modify Preferences
-          if os.path.exists(prefs_file):
-              with open(prefs_file) as f:
-                  prefs = json.load(f)
+          def cdp_send(ws, method, params=None, msg_id=1):
+              msg = {"id": msg_id, "method": method}
+              if params:
+                  msg["params"] = params
+              ws.send(json.dumps(msg))
+              while True:
+                  resp = json.loads(ws.recv())
+                  if resp.get("id") == msg_id:
+                      return resp
+
+          # Find the chrome://extensions tab
+          targets = cdp_http("/json/list") or []
+          ext_tab = None
+          for t in targets:
+              if "chrome://extensions" in t.get("url", ""):
+                  ext_tab = t
+                  break
+
+          if not ext_tab:
+              print("  Opening chrome://extensions tab...")
+              ext_tab = cdp_http("/json/new?chrome://extensions")
+              time.sleep(3)
+              if not ext_tab:
+                  print("  ❌ Failed to open chrome://extensions")
+                  exit(1)
+
+          ws_url = ext_tab.get("webSocketDebuggerUrl")
+          if not ws_url:
+              print("  ❌ No WebSocket URL for extensions tab")
+              exit(1)
+
+          print(f"  Connected to: {ext_tab.get('url')}")
+          ws = websocket.create_connection(ws_url, timeout=15)
+          time.sleep(2)
+
+          # Toggle developer mode via chrome://extensions shadow DOM
+          toggle_js = """
+          (async function() {
+              for (let i = 0; i < 20; i++) {
+                  const manager = document.querySelector('extensions-manager');
+                  if (manager && manager.shadowRoot) {
+                      const toolbar = manager.shadowRoot.querySelector('extensions-toolbar');
+                      if (toolbar && toolbar.shadowRoot) {
+                          const toggle = toolbar.shadowRoot.querySelector('#devMode');
+                          if (toggle) {
+                              if (!toggle.checked) {
+                                  toggle.click();
+                                  await new Promise(r => setTimeout(r, 1000));
+                                  return 'ENABLED';
+                              }
+                              return 'ALREADY_ENABLED';
+                          }
+                      }
+                  }
+                  await new Promise(r => setTimeout(r, 500));
+              }
+              return 'TIMEOUT';
+          })()
+          """
+
+          result = cdp_send(ws, "Runtime.evaluate", {
+              "expression": toggle_js,
+              "awaitPromise": True
+          })
+
+          status = result.get("result", {}).get("result", {}).get("value", "unknown")
+          print(f"  Developer mode: {status}")
+
+          if status == "TIMEOUT":
+              print("  ❌ Could not find developer mode toggle")
+              ws.close()
+              exit(1)
+
+          time.sleep(2)
+
+          # Verify toggle is ON
+          verify_js = """
+          (function() {
+              const manager = document.querySelector('extensions-manager');
+              if (!manager || !manager.shadowRoot) return 'no manager';
+              const toolbar = manager.shadowRoot.querySelector('extensions-toolbar');
+              if (!toolbar || !toolbar.shadowRoot) return 'no toolbar';
+              const toggle = toolbar.shadowRoot.querySelector('#devMode');
+              if (!toggle) return 'no toggle';
+              return toggle.checked ? 'ON' : 'OFF';
+          })()
+          """
+
+          verify = cdp_send(ws, "Runtime.evaluate", {"expression": verify_js}, msg_id=2)
+          dev_state = verify.get("result", {}).get("result", {}).get("value", "unknown")
+          print(f"  Developer mode toggle: {dev_state}")
+          ws.close()
+
+          if dev_state == "ON":
+              print("  ✅ Developer mode is ON")
           else:
-              prefs = {}
-
-          # Enable developer mode
-          prefs.setdefault("extensions", {}).setdefault("ui", {})["developer_mode"] = True
-
-          # Set clean exit to avoid recovery prompts
-          prefs.setdefault("profile", {})["exited_cleanly"] = True
-          prefs.setdefault("profile", {})["exit_type"] = "Normal"
-
-          with open(prefs_file, "w") as f:
-              json.dump(prefs, f, indent=2)
-          print("  Preferences updated: developer_mode=true")
-
-          # Delete Secure Preferences to force Chrome to re-compute HMACs
-          # from the current Preferences values (including our developer_mode=true)
-          if os.path.exists(secure_prefs_file):
-              os.remove(secure_prefs_file)
-              print("  Secure Preferences deleted (Chrome will re-hash)")
-          else:
-              print("  No Secure Preferences found")
-
-          # Also check for Local State
-          local_state = os.path.expanduser("~/chrome-botxbyte-profile/Local State")
-          if os.path.exists(local_state):
-              with open(local_state) as f:
-                  state = json.load(f)
-              # Clear any protection MACs in Local State
-              if "protection" in state:
-                  del state["protection"]
-                  with open(local_state, "w") as f:
-                      json.dump(state, f, indent=2)
-                  print("  Local State protection MACs cleared")
-
-          print("  Developer mode configuration complete")
+              print(f"  ⚠️ Developer mode: {dev_state}")
           PYEOF
 
           # ================================================================
-          # PHASE 3: Launch Chrome with extension
+          # PHASE 3: Kill Chrome, relaunch WITH the extension loaded
+          # Developer mode is now properly saved with correct HMACs
           # ================================================================
-          echo "Phase 3: Launching Chrome with extension..."
-          echo "  Extension dir: $EXTENSION_DIR"
-          echo "  Profile dir: $CHROME_PROFILE_DIR"
+          echo "Phase 3: Restarting Chrome with extension..."
+
+          pkill -f "google-chrome" 2>/dev/null || true
+          sleep 3
+
+          # Mark clean exit to avoid "Chrome didn't shut down correctly" dialog
+          python3 -c "
+          import json, os
+          pf = os.path.expanduser('~/chrome-botxbyte-profile/Default/Preferences')
+          if os.path.exists(pf):
+              with open(pf) as f: p = json.load(f)
+              p.setdefault('profile', {})['exited_cleanly'] = True
+              p.setdefault('profile', {})['exit_type'] = 'Normal'
+              with open(pf, 'w') as f: json.dump(p, f, indent=2)
+              print('  Clean exit set')
+          "
 
           google-chrome \
             --no-first-run \
@@ -509,66 +593,109 @@ jobs:
             2>/tmp/chrome-stderr.log &
 
           CHROME_PID=$!
-          echo "Chrome PID: $CHROME_PID"
-
-          # Wait for Chrome to fully initialize
+          echo "  Chrome PID: $CHROME_PID"
           sleep 12
 
           if ! pgrep -f "google-chrome" > /dev/null; then
-            echo "❌ Chrome failed to launch"
-            tail -30 /tmp/chrome-stderr.log 2>/dev/null || true
+            echo "❌ Chrome failed to relaunch"
+            tail -20 /tmp/chrome-stderr.log 2>/dev/null || true
             exit 1
           fi
 
-          echo "✅ Chrome process is running"
-
           # ================================================================
-          # PHASE 4: Verify extension via Chrome DevTools Protocol
+          # PHASE 4: Verify extension is loaded, visible, and active
           # ================================================================
-          echo "Phase 4: Verifying extension via CDP..."
+          echo "Phase 4: Verifying extension..."
 
           python3 << 'PYEOF'
-          import urllib.request, json, time
+          import websocket
+          import json
+          import time
+          import urllib.request
 
-          def cdp_request(url):
+          def cdp_http(path):
               try:
-                  req = urllib.request.Request(url)
-                  with urllib.request.urlopen(req, timeout=5) as resp:
-                      return json.loads(resp.read())
-              except Exception as e:
+                  resp = urllib.request.urlopen(f"http://localhost:9222{path}", timeout=10)
+                  return json.loads(resp.read())
+              except:
                   return None
 
-          # Check open tabs/targets
-          targets = cdp_request("http://localhost:9222/json/list")
-          if targets:
-              print(f"  Chrome targets: {len(targets)}")
-              for t in targets:
-                  ttype = t.get("type", "?")
-                  url = t.get("url", "?")
-                  title = t.get("title", "?")
+          def cdp_send(ws, method, params=None, msg_id=1):
+              msg = {"id": msg_id, "method": method}
+              if params:
+                  msg["params"] = params
+              ws.send(json.dumps(msg))
+              while True:
+                  resp = json.loads(ws.recv())
+                  if resp.get("id") == msg_id:
+                      return resp
+
+          # Check CDP targets for service worker
+          targets = cdp_http("/json/list") or []
+          print(f"  Chrome targets: {len(targets)}")
+          sw_found = False
+          for t in targets:
+              ttype = t.get("type", "?")
+              url = t.get("url", "?")
+              title = t.get("title", "?")
+              if ttype == "service_worker" or "extension" in url.lower():
                   print(f"    [{ttype}] {title} - {url}")
+              if ttype == "service_worker" and "nmmhkkegccagdldgiimedpiccmgmieda" not in url:
+                  sw_found = True
+                  print(f"  ✅ BotXByte service worker RUNNING: {url}")
 
-                  # Service worker = extension background script is running
-                  if ttype == "service_worker":
-                      print(f"  ✅ Extension service worker is RUNNING: {url}")
+          if not sw_found:
+              print("  ⚠️ BotXByte service worker not found")
 
-              # Check for extension targets (background pages, service workers)
-              ext_targets = [t for t in targets if "extension" in t.get("url", "").lower() or t.get("type") == "service_worker"]
-              if ext_targets:
-                  print(f"  ✅ Found {len(ext_targets)} extension target(s) - extension is ACTIVE")
-              else:
-                  print("  ⚠️ No extension targets found - extension may not be active")
-                  print("  Checking chrome://extensions page for details...")
-          else:
-              print("  ⚠️ Could not connect to Chrome DevTools Protocol")
+          # Connect to chrome://extensions tab and check visible extensions
+          ext_tab = None
+          for t in targets:
+              if "chrome://extensions" in t.get("url", ""):
+                  ext_tab = t
+                  break
 
-          # Also check version info
-          version = cdp_request("http://localhost:9222/json/version")
-          if version:
-              print(f"  Chrome: {version.get('Browser', '?')}")
+          if ext_tab and ext_tab.get("webSocketDebuggerUrl"):
+              ws = websocket.create_connection(ext_tab["webSocketDebuggerUrl"], timeout=15)
+              time.sleep(2)
+
+              check_js = """
+              (function() {
+                  const manager = document.querySelector('extensions-manager');
+                  if (!manager || !manager.shadowRoot) return JSON.stringify({error: 'no manager'});
+                  const toolbar = manager.shadowRoot.querySelector('extensions-toolbar');
+                  const devMode = toolbar?.shadowRoot?.querySelector('#devMode')?.checked || false;
+                  const items = manager.shadowRoot.querySelectorAll('extensions-item');
+                  const exts = [];
+                  items.forEach(item => {
+                      const sr = item.shadowRoot;
+                      const name = sr?.querySelector('#name')?.textContent?.trim() || 'unknown';
+                      const id = item.id || 'unknown';
+                      exts.push({name: name, id: id});
+                  });
+                  return JSON.stringify({devMode: devMode, extensions: exts});
+              })()
+              """
+
+              result = cdp_send(ws, "Runtime.evaluate", {"expression": check_js})
+              val = result.get("result", {}).get("result", {}).get("value", "{}")
+
+              try:
+                  data = json.loads(val)
+                  print(f"  Developer mode: {'ON' if data.get('devMode') else 'OFF'}")
+                  exts = data.get("extensions", [])
+                  print(f"  Visible extensions: {len(exts)}")
+                  for e in exts:
+                      print(f"    - {e.get('name')} (ID: {e.get('id')})")
+              except:
+                  print(f"  Raw: {val}")
+
+              ws.close()
+
+          version = cdp_http("/json/version") or {}
+          print(f"  Chrome: {version.get('Browser', '?')}")
           PYEOF
 
-          # Check if server.py is still running
+          # Check server.py
           if pgrep -f "server.py" > /dev/null; then
             echo "✅ BotXByte server is running"
           else
@@ -577,8 +704,6 @@ jobs:
           fi
 
           echo "✅ Chrome launch complete"
-          echo "  Profile dir: $CHROME_PROFILE_DIR"
-          echo "  Extension should auto-connect to ws://localhost:8765"
 
       - name: Install cloudflared
         if: steps.config.outputs.cloudflare_enabled == 'true'
