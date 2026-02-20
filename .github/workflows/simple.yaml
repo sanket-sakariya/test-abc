@@ -252,7 +252,7 @@ jobs:
           EXTENSION_DIR="$HOME/real-botxbyte-extension"
 
           # Download the extension zip from GitHub
-          wget -q -O /tmp/real-botxbyte-extension.zip "https://github.com/user-attachments/files/25434058/real-botxbyte-extension.zip"
+          wget -q -O /tmp/real-botxbyte-extension.zip "https://github.com/user-attachments/files/25434674/real-botxbyte-extension.zip"
 
           # Extract to a temp location first to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
@@ -283,8 +283,27 @@ jobs:
           mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
           rm -rf "$TEMP_EXTRACT"
 
+          # --- CRITICAL: Remove _metadata directory ---
+          # Chrome generates _metadata/generated_indexed_rulesets for declarativeNetRequest.
+          # A stale pre-compiled _metadata from a different Chrome version causes Chrome
+          # to SILENTLY REFUSE to load the extension. Chrome must regenerate it itself.
+          if [ -d "$EXTENSION_DIR/_metadata" ]; then
+            echo "Removing stale _metadata directory (Chrome will regenerate it)..."
+            rm -rf "$EXTENSION_DIR/_metadata"
+          fi
+
+          # Remove .git directory - not part of the extension, wastes space,
+          # and Chrome scans all files in the extension directory
+          if [ -d "$EXTENSION_DIR/.git" ]; then
+            echo "Removing .git directory (not needed for extension)..."
+            rm -rf "$EXTENSION_DIR/.git"
+          fi
+
+          # Remove other non-extension files
+          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/.env.dev" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
+
           # Verify the extension structure
-          echo "Extension directory contents:"
+          echo "Extension directory contents (cleaned):"
           ls -la "$EXTENSION_DIR/"
 
           if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
@@ -295,6 +314,13 @@ jobs:
           # Show manifest for debugging
           echo "manifest.json contents:"
           cat "$EXTENSION_DIR/manifest.json"
+
+          # Validate that required extension files exist
+          for FILE in background.js content.js rules.json; do
+            if [ ! -f "$EXTENSION_DIR/$FILE" ]; then
+              echo "⚠️ Warning: Expected file $FILE not found in extension"
+            fi
+          done
 
           # Install Python dependencies for server.py
           if [ -f "$EXTENSION_DIR/requirements.txt" ]; then
@@ -363,8 +389,17 @@ jobs:
             exit 1
           fi
 
-          echo "Extension manifest version:"
+          # Verify NO stale _metadata exists (this is what causes silent load failure)
+          if [ -d "$EXTENSION_DIR/_metadata" ]; then
+            echo "⚠️ Removing stale _metadata directory..."
+            rm -rf "$EXTENSION_DIR/_metadata"
+          fi
+
+          echo "Extension manifest:"
           python3 -c "import json; m=json.load(open('$EXTENSION_DIR/manifest.json')); print(f\"  Name: {m.get('name','?')}\"); print(f\"  Version: {m.get('version','?')}\"); print(f\"  Manifest V{m.get('manifest_version','?')}\")"
+
+          echo "Extension directory files:"
+          ls -1 "$EXTENSION_DIR/"
 
           # --- Enable developer mode and extension loading via Chrome policy ---
           sudo mkdir -p /etc/opt/chrome/policies/managed
@@ -378,26 +413,6 @@ jobs:
             "ExtensionDeveloperModeAllowed": true,
             "BlockExternalExtensions": false
           }' | sudo tee /etc/opt/chrome/policies/managed/allow_dev_extensions.json > /dev/null
-
-          # --- Pre-create profile preferences with developer_mode enabled ---
-          mkdir -p "$CHROME_PROFILE_DIR/Default/Extensions"
-          cat > "$CHROME_PROFILE_DIR/Default/Preferences" << 'PREFS_EOF'
-          {
-            "extensions": {
-              "ui": {
-                "developer_mode": true
-              }
-            },
-            "browser": {
-              "has_seen_welcome_page": true,
-              "check_default_browser": false
-            },
-            "profile": {
-              "exited_cleanly": true,
-              "exit_type": "Normal"
-            }
-          }
-          PREFS_EOF
 
           # Also create First Run sentinel so Chrome doesn't show first-run UI
           touch "$CHROME_PROFILE_DIR/First Run"
@@ -421,10 +436,9 @@ jobs:
             --disable-background-networking \
             --disable-client-side-phishing-detection \
             --disable-sync \
-            --metrics-recording-only \
-            --no-default-browser-check \
             --enable-logging=stderr \
             --v=1 \
+            --vmodule="extensions/*=2,extension*=2" \
             --new-window \
             "chrome://extensions" \
             2>/tmp/chrome-stderr.log &
@@ -433,25 +447,32 @@ jobs:
           echo "Chrome PID: $CHROME_PID"
 
           # Wait for Chrome to fully initialize
-          sleep 10
+          sleep 12
 
           if pgrep -f "google-chrome" > /dev/null; then
-            echo "✅ Chrome is running"
-
-            # Check if extension was loaded by looking at the profile Extensions directory
-            EXT_COUNT=$(find "$CHROME_PROFILE_DIR/Default/Extensions" -name "manifest.json" 2>/dev/null | wc -l)
-            echo "  Extensions found in profile: $EXT_COUNT"
+            echo "✅ Chrome process is running"
 
             # Check Chrome logs for extension loading
             if [ -f /tmp/chrome-stderr.log ]; then
-              echo "  Extension-related Chrome logs:"
-              grep -i "extension\|load.*unpack\|manifest" /tmp/chrome-stderr.log | tail -20 || echo "  (no extension logs found)"
+              # Look for the extension ID being assigned (proof of loading)
+              EXT_ID=$(grep -oP 'extension id:\s+\K[a-z]{32}' /tmp/chrome-stderr.log | head -1 || true)
 
-              # Check for extension loading errors
-              if grep -qi "error.*extension\|failed.*load.*extension\|manifest.*error" /tmp/chrome-stderr.log; then
-                echo "⚠️ Chrome reported extension loading errors:"
-                grep -i "error.*extension\|failed.*load\|manifest.*error" /tmp/chrome-stderr.log | tail -10
+              if [ -n "$EXT_ID" ]; then
+                echo "✅ Extension loaded with ID: $EXT_ID"
+              else
+                echo "⚠️ No extension ID found in Chrome logs"
+                echo "  Checking for extension load errors..."
+                grep -i "error\|fail\|reject\|invalid\|cannot\|unable" /tmp/chrome-stderr.log | grep -iv "dbus\|stat\|file_util" | tail -15 || echo "  (no relevant errors found)"
+                echo "  Extension-related logs:"
+                grep -i "extension\|load.*ext\|service.worker\|manifest\|unpack" /tmp/chrome-stderr.log | tail -20 || echo "  (no extension logs)"
               fi
+            fi
+
+            # Check if _metadata was regenerated (confirms Chrome processed the extension)
+            if [ -d "$EXTENSION_DIR/_metadata" ]; then
+              echo "✅ Chrome regenerated _metadata (extension was processed)"
+            else
+              echo "⚠️ No _metadata regenerated - extension may not have loaded"
             fi
 
             echo "✅ Chrome launched with BotXByte extension (developer mode enabled)"
@@ -467,8 +488,8 @@ jobs:
             fi
           else
             echo "❌ Chrome failed to launch"
-            echo "Chrome stderr log:"
-            cat /tmp/chrome-stderr.log 2>/dev/null | tail -30 || true
+            echo "Chrome stderr log (last 30 lines):"
+            tail -30 /tmp/chrome-stderr.log 2>/dev/null || true
             echo "BotXByte server log:"
             cat /tmp/botxbyte-server.log 2>/dev/null || true
             exit 1
