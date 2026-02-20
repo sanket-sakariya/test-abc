@@ -370,38 +370,32 @@ jobs:
 
           export DISPLAY=:1
           export NO_AT_BRIDGE=1
-
-          # Suppress D-Bus errors in headless environment
           export DBUS_SESSION_BUS_ADDRESS=/dev/null
 
           EXTENSION_DIR="$HOME/real-botxbyte-extension"
           CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
 
-          # Clean any previous profile to avoid stale state
+          # Clean any previous profile
           rm -rf "$CHROME_PROFILE_DIR"
           mkdir -p "$CHROME_PROFILE_DIR"
 
-          # --- Verify extension directory has manifest.json ---
+          # --- Verify extension directory ---
           if [ ! -f "$EXTENSION_DIR/manifest.json" ]; then
-            echo "❌ Extension manifest.json not found at $EXTENSION_DIR/manifest.json"
-            echo "Directory contents:"
+            echo "❌ Extension manifest.json not found"
             ls -laR "$EXTENSION_DIR/" 2>/dev/null || echo "Directory does not exist"
             exit 1
           fi
 
-          # Verify NO stale _metadata exists (this is what causes silent load failure)
-          if [ -d "$EXTENSION_DIR/_metadata" ]; then
-            echo "⚠️ Removing stale _metadata directory..."
-            rm -rf "$EXTENSION_DIR/_metadata"
-          fi
+          # Remove stale _metadata if present
+          rm -rf "$EXTENSION_DIR/_metadata" 2>/dev/null || true
 
           echo "Extension manifest:"
           python3 -c "import json; m=json.load(open('$EXTENSION_DIR/manifest.json')); print(f\"  Name: {m.get('name','?')}\"); print(f\"  Version: {m.get('version','?')}\"); print(f\"  Manifest V{m.get('manifest_version','?')}\")"
 
-          echo "Extension directory files:"
+          echo "Extension files:"
           ls -1 "$EXTENSION_DIR/"
 
-          # --- Enable developer mode and extension loading via Chrome policy ---
+          # --- Chrome policy ---
           sudo mkdir -p /etc/opt/chrome/policies/managed
           echo '{
             "ExtensionSettings": {
@@ -414,15 +408,92 @@ jobs:
             "BlockExternalExtensions": false
           }' | sudo tee /etc/opt/chrome/policies/managed/allow_dev_extensions.json > /dev/null
 
-          # Also create First Run sentinel so Chrome doesn't show first-run UI
+          # ================================================================
+          # PHASE 1: Initialize Chrome profile (headless, no extension)
+          # This creates the profile with proper Secure Preferences HMACs
+          # ================================================================
+          echo "Phase 1: Initializing Chrome profile..."
           touch "$CHROME_PROFILE_DIR/First Run"
 
-          echo "Launching Chrome..."
+          google-chrome \
+            --headless=new \
+            --no-first-run \
+            --no-sandbox \
+            --disable-gpu \
+            --disable-dev-shm-usage \
+            --user-data-dir="$CHROME_PROFILE_DIR" \
+            --dump-dom "about:blank" > /dev/null 2>&1 || true
+
+          sleep 3
+
+          # Kill headless Chrome
+          pkill -f "google-chrome" 2>/dev/null || true
+          sleep 2
+
+          echo "  Profile created. Files:"
+          ls -la "$CHROME_PROFILE_DIR/Default/" 2>/dev/null | head -10
+
+          # ================================================================
+          # PHASE 2: Enable developer mode in the initialized profile
+          # Delete Secure Preferences so Chrome re-hashes from Preferences
+          # ================================================================
+          echo "Phase 2: Enabling developer mode in profile..."
+
+          python3 << 'PYEOF'
+          import json, os, sys
+
+          profile_dir = os.path.expanduser("~/chrome-botxbyte-profile/Default")
+          prefs_file = os.path.join(profile_dir, "Preferences")
+          secure_prefs_file = os.path.join(profile_dir, "Secure Preferences")
+
+          # Read and modify Preferences
+          if os.path.exists(prefs_file):
+              with open(prefs_file) as f:
+                  prefs = json.load(f)
+          else:
+              prefs = {}
+
+          # Enable developer mode
+          prefs.setdefault("extensions", {}).setdefault("ui", {})["developer_mode"] = True
+
+          # Set clean exit to avoid recovery prompts
+          prefs.setdefault("profile", {})["exited_cleanly"] = True
+          prefs.setdefault("profile", {})["exit_type"] = "Normal"
+
+          with open(prefs_file, "w") as f:
+              json.dump(prefs, f, indent=2)
+          print("  Preferences updated: developer_mode=true")
+
+          # Delete Secure Preferences to force Chrome to re-compute HMACs
+          # from the current Preferences values (including our developer_mode=true)
+          if os.path.exists(secure_prefs_file):
+              os.remove(secure_prefs_file)
+              print("  Secure Preferences deleted (Chrome will re-hash)")
+          else:
+              print("  No Secure Preferences found")
+
+          # Also check for Local State
+          local_state = os.path.expanduser("~/chrome-botxbyte-profile/Local State")
+          if os.path.exists(local_state):
+              with open(local_state) as f:
+                  state = json.load(f)
+              # Clear any protection MACs in Local State
+              if "protection" in state:
+                  del state["protection"]
+                  with open(local_state, "w") as f:
+                      json.dump(state, f, indent=2)
+                  print("  Local State protection MACs cleared")
+
+          print("  Developer mode configuration complete")
+          PYEOF
+
+          # ================================================================
+          # PHASE 3: Launch Chrome with extension
+          # ================================================================
+          echo "Phase 3: Launching Chrome with extension..."
           echo "  Extension dir: $EXTENSION_DIR"
           echo "  Profile dir: $CHROME_PROFILE_DIR"
 
-          # Launch Chrome with the unpacked extension loaded
-          # Redirect stderr to log file to avoid D-Bus noise in CI output
           google-chrome \
             --no-first-run \
             --no-default-browser-check \
@@ -430,15 +501,9 @@ jobs:
             --no-sandbox \
             --disable-dev-shm-usage \
             --enable-extensions \
-            --disable-extensions-except="$EXTENSION_DIR" \
             --load-extension="$EXTENSION_DIR" \
             --user-data-dir="$CHROME_PROFILE_DIR" \
-            --disable-background-networking \
-            --disable-client-side-phishing-detection \
-            --disable-sync \
-            --enable-logging=stderr \
-            --v=1 \
-            --vmodule="extensions/*=2,extension*=2" \
+            --remote-debugging-port=9222 \
             --new-window \
             "chrome://extensions" \
             2>/tmp/chrome-stderr.log &
@@ -449,51 +514,71 @@ jobs:
           # Wait for Chrome to fully initialize
           sleep 12
 
-          if pgrep -f "google-chrome" > /dev/null; then
-            echo "✅ Chrome process is running"
-
-            # Check Chrome logs for extension loading
-            if [ -f /tmp/chrome-stderr.log ]; then
-              # Look for the extension ID being assigned (proof of loading)
-              EXT_ID=$(grep -oP 'extension id:\s+\K[a-z]{32}' /tmp/chrome-stderr.log | head -1 || true)
-
-              if [ -n "$EXT_ID" ]; then
-                echo "✅ Extension loaded with ID: $EXT_ID"
-              else
-                echo "⚠️ No extension ID found in Chrome logs"
-                echo "  Checking for extension load errors..."
-                grep -i "error\|fail\|reject\|invalid\|cannot\|unable" /tmp/chrome-stderr.log | grep -iv "dbus\|stat\|file_util" | tail -15 || echo "  (no relevant errors found)"
-                echo "  Extension-related logs:"
-                grep -i "extension\|load.*ext\|service.worker\|manifest\|unpack" /tmp/chrome-stderr.log | tail -20 || echo "  (no extension logs)"
-              fi
-            fi
-
-            # Check if _metadata was regenerated (confirms Chrome processed the extension)
-            if [ -d "$EXTENSION_DIR/_metadata" ]; then
-              echo "✅ Chrome regenerated _metadata (extension was processed)"
-            else
-              echo "⚠️ No _metadata regenerated - extension may not have loaded"
-            fi
-
-            echo "✅ Chrome launched with BotXByte extension (developer mode enabled)"
-            echo "  Extension will auto-connect to ws://localhost:8765"
-            echo "  Profile dir: $CHROME_PROFILE_DIR"
-
-            # Also verify server.py is still running
-            if pgrep -f "server.py" > /dev/null; then
-              echo "✅ BotXByte server is running"
-            else
-              echo "⚠️ BotXByte server is NOT running - extension won't be able to connect"
-              cat /tmp/botxbyte-server.log 2>/dev/null || true
-            fi
-          else
+          if ! pgrep -f "google-chrome" > /dev/null; then
             echo "❌ Chrome failed to launch"
-            echo "Chrome stderr log (last 30 lines):"
             tail -30 /tmp/chrome-stderr.log 2>/dev/null || true
-            echo "BotXByte server log:"
-            cat /tmp/botxbyte-server.log 2>/dev/null || true
             exit 1
           fi
+
+          echo "✅ Chrome process is running"
+
+          # ================================================================
+          # PHASE 4: Verify extension via Chrome DevTools Protocol
+          # ================================================================
+          echo "Phase 4: Verifying extension via CDP..."
+
+          python3 << 'PYEOF'
+          import urllib.request, json, time
+
+          def cdp_request(url):
+              try:
+                  req = urllib.request.Request(url)
+                  with urllib.request.urlopen(req, timeout=5) as resp:
+                      return json.loads(resp.read())
+              except Exception as e:
+                  return None
+
+          # Check open tabs/targets
+          targets = cdp_request("http://localhost:9222/json/list")
+          if targets:
+              print(f"  Chrome targets: {len(targets)}")
+              for t in targets:
+                  ttype = t.get("type", "?")
+                  url = t.get("url", "?")
+                  title = t.get("title", "?")
+                  print(f"    [{ttype}] {title} - {url}")
+
+                  # Service worker = extension background script is running
+                  if ttype == "service_worker":
+                      print(f"  ✅ Extension service worker is RUNNING: {url}")
+
+              # Check for extension targets (background pages, service workers)
+              ext_targets = [t for t in targets if "extension" in t.get("url", "").lower() or t.get("type") == "service_worker"]
+              if ext_targets:
+                  print(f"  ✅ Found {len(ext_targets)} extension target(s) - extension is ACTIVE")
+              else:
+                  print("  ⚠️ No extension targets found - extension may not be active")
+                  print("  Checking chrome://extensions page for details...")
+          else:
+              print("  ⚠️ Could not connect to Chrome DevTools Protocol")
+
+          # Also check version info
+          version = cdp_request("http://localhost:9222/json/version")
+          if version:
+              print(f"  Chrome: {version.get('Browser', '?')}")
+          PYEOF
+
+          # Check if server.py is still running
+          if pgrep -f "server.py" > /dev/null; then
+            echo "✅ BotXByte server is running"
+          else
+            echo "⚠️ BotXByte server is NOT running"
+            cat /tmp/botxbyte-server.log 2>/dev/null || true
+          fi
+
+          echo "✅ Chrome launch complete"
+          echo "  Profile dir: $CHROME_PROFILE_DIR"
+          echo "  Extension should auto-connect to ws://localhost:8765"
 
       - name: Install cloudflared
         if: steps.config.outputs.cloudflare_enabled == 'true'
@@ -792,12 +877,9 @@ jobs:
                 --no-sandbox \
                 --disable-dev-shm-usage \
                 --enable-extensions \
-                --disable-extensions-except="$EXTENSION_DIR" \
                 --load-extension="$EXTENSION_DIR" \
                 --user-data-dir="$CHROME_PROFILE_DIR" \
-                --disable-background-networking \
-                --disable-client-side-phishing-detection \
-                --disable-sync \
+                --remote-debugging-port=9222 \
                 --new-window \
                 "chrome://extensions" \
                 2>/tmp/chrome-stderr.log &
