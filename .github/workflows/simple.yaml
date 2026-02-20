@@ -422,6 +422,7 @@ jobs:
             --enable-extensions \
             --user-data-dir="$CHROME_PROFILE_DIR" \
             --remote-debugging-port=9222 \
+            --remote-allow-origins=* \
             --new-window \
             "chrome://extensions" \
             2>/tmp/chrome-stderr.log &
@@ -621,6 +622,7 @@ jobs:
             --load-extension="$EXTENSION_DIR" \
             --user-data-dir="$CHROME_PROFILE_DIR" \
             --remote-debugging-port=9222 \
+            --remote-allow-origins=* \
             --new-window \
             "chrome://extensions" \
             2>/tmp/chrome-stderr.log &
@@ -1038,6 +1040,7 @@ jobs:
                 --load-extension="$EXTENSION_DIR" \
                 --user-data-dir="$CHROME_PROFILE_DIR" \
                 --remote-debugging-port=9222 \
+                --remote-allow-origins=* \
                 --new-window \
                 "chrome://extensions" \
                 2>/tmp/chrome-stderr.log &
