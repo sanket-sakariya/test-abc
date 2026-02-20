@@ -315,20 +315,46 @@ jobs:
           CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
           mkdir -p "$CHROME_PROFILE_DIR"
 
-          # Launch Chrome with the extension loaded
+          # --- Enable developer mode via Chrome policy ---
+          sudo mkdir -p /etc/opt/chrome/policies/managed
+          echo '{
+            "ExtensionSettings": {
+              "*": {
+                "installation_mode": "allowed"
+              }
+            },
+            "DeveloperToolsAvailability": 1,
+            "ExtensionDeveloperModeAllowed": true
+          }' | sudo tee /etc/opt/chrome/policies/managed/allow_dev_extensions.json > /dev/null
+
+          # --- Pre-create profile preferences with developer_mode enabled ---
+          mkdir -p "$CHROME_PROFILE_DIR/Default"
+          echo '{
+            "extensions": {
+              "ui": {
+                "developer_mode": true
+              }
+            }
+          }' > "$CHROME_PROFILE_DIR/Default/Preferences"
+
+          # Launch Chrome with the unpacked extension loaded
           google-chrome \
             --no-first-run \
             --no-default-browser-check \
             --disable-gpu \
-            --user-data-dir="$CHROME_PROFILE_DIR" \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --enable-extensions \
+            --disable-extensions-except="$EXTENSION_DIR" \
             --load-extension="$EXTENSION_DIR" \
+            --user-data-dir="$CHROME_PROFILE_DIR" \
             --new-window \
             "about:blank" &
 
           sleep 8
 
           if pgrep -f "google-chrome" > /dev/null; then
-            echo "✅ Chrome launched with BotXByte extension"
+            echo "✅ Chrome launched with BotXByte extension (developer mode enabled)"
             echo "  Extension will auto-connect to ws://localhost:8765"
             echo "  Profile dir: $CHROME_PROFILE_DIR"
           else
@@ -628,8 +654,12 @@ jobs:
                 --no-first-run \
                 --no-default-browser-check \
                 --disable-gpu \
-                --user-data-dir="$CHROME_PROFILE_DIR" \
+                --no-sandbox \
+                --disable-dev-shm-usage \
+                --enable-extensions \
+                --disable-extensions-except="$EXTENSION_DIR" \
                 --load-extension="$EXTENSION_DIR" \
+                --user-data-dir="$CHROME_PROFILE_DIR" \
                 --new-window \
                 "about:blank" &
               sleep 5
