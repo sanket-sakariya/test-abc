@@ -244,16 +244,25 @@ jobs:
             fi
           fi
 
-      - name: Setup BotXByte Extension
+      - name: Download and Setup BotXByte Extension
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
-          echo "Setting up BotXByte extension..."
+          echo "Downloading BotXByte extension..."
 
-          EXTENSION_DIR="${GITHUB_WORKSPACE}/real-botxbyte-extension"
+          EXTENSION_DIR="$HOME/real-botxbyte-extension"
 
+          # Download the extension zip from GitHub
+          wget -q -O /tmp/real-botxbyte-extension.zip "https://github.com/user-attachments/files/25434058/real-botxbyte-extension.zip"
+
+          # Extract to home directory
+          unzip -o /tmp/real-botxbyte-extension.zip -d "$HOME/"
+          rm /tmp/real-botxbyte-extension.zip
+
+          # Verify extraction
           if [ ! -d "$EXTENSION_DIR" ]; then
-            echo "❌ Extension directory not found at $EXTENSION_DIR"
-            ls -la "${GITHUB_WORKSPACE}/"
+            echo "❌ Extension directory not found after extraction"
+            echo "Contents of $HOME/:"
+            ls -la "$HOME/"
             exit 1
           fi
 
@@ -271,7 +280,7 @@ jobs:
         run: |
           echo "Starting BotXByte server (server.py)..."
 
-          EXTENSION_DIR="${GITHUB_WORKSPACE}/real-botxbyte-extension"
+          EXTENSION_DIR="$HOME/real-botxbyte-extension"
 
           # Export environment variables for server.py
           export WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
@@ -302,7 +311,7 @@ jobs:
           export DISPLAY=:1
           export NO_AT_BRIDGE=1
 
-          EXTENSION_DIR="${GITHUB_WORKSPACE}/real-botxbyte-extension"
+          EXTENSION_DIR="$HOME/real-botxbyte-extension"
           CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
           mkdir -p "$CHROME_PROFILE_DIR"
 
@@ -595,7 +604,7 @@ jobs:
             # Check and restart BotXByte server if needed
             if ! kill -0 ${{ steps.botxbyte_server.outputs.server_pid }} 2>/dev/null; then
               echo "❌ BotXByte server stopped! Restarting..."
-              EXTENSION_DIR="${GITHUB_WORKSPACE}/real-botxbyte-extension"
+              EXTENSION_DIR="$HOME/real-botxbyte-extension"
               cd "$EXTENSION_DIR"
               export WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
               nohup python3 server.py > /tmp/botxbyte-server.log 2>&1 &
@@ -613,7 +622,7 @@ jobs:
               echo "❌ Chrome stopped! Restarting..."
               export DISPLAY=:1
               export NO_AT_BRIDGE=1
-              EXTENSION_DIR="${GITHUB_WORKSPACE}/real-botxbyte-extension"
+              EXTENSION_DIR="$HOME/real-botxbyte-extension"
               CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
               google-chrome \
                 --no-first-run \
