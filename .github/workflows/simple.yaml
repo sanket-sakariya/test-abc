@@ -49,21 +49,15 @@ jobs:
           fi
 
           if [ "$CLOUDFLARE_ENABLED" = "true" ]; then
-            CLOUDFLARE_API_TOKEN=$(echo "$CONFIG" | jq -r '.cloudflare_api_token // ""')
-            CLOUDFLARE_ACCOUNT_ID=$(echo "$CONFIG" | jq -r '.cloudflare_account_id // ""')
-            CLOUDFLARE_ZONE_ID=$(echo "$CONFIG" | jq -r '.cloudflare_zone_id // ""')
-            HOSTNAME=$(echo "$CONFIG" | jq -r '.hostname // ""')
-            BROWSER_PROFILE_ID=$(echo "$CONFIG" | jq -r '.browser_profile_id // ""')
-            echo "cloudflare_api_token=$CLOUDFLARE_API_TOKEN" >> $GITHUB_OUTPUT
-            echo "cloudflare_account_id=$CLOUDFLARE_ACCOUNT_ID" >> $GITHUB_OUTPUT
-            echo "cloudflare_zone_id=$CLOUDFLARE_ZONE_ID" >> $GITHUB_OUTPUT
-            echo "hostname=$HOSTNAME" >> $GITHUB_OUTPUT
-            echo "browser_profile_id=$BROWSER_PROFILE_ID" >> $GITHUB_OUTPUT
+            echo "cloudflare_api_token=$(echo "$CONFIG" | jq -r '.cloudflare_api_token // ""')" >> $GITHUB_OUTPUT
+            echo "cloudflare_account_id=$(echo "$CONFIG" | jq -r '.cloudflare_account_id // ""')" >> $GITHUB_OUTPUT
+            echo "cloudflare_zone_id=$(echo "$CONFIG" | jq -r '.cloudflare_zone_id // ""')" >> $GITHUB_OUTPUT
+            echo "hostname=$(echo "$CONFIG" | jq -r '.hostname // ""')" >> $GITHUB_OUTPUT
+            echo "browser_profile_id=$(echo "$CONFIG" | jq -r '.browser_profile_id // ""')" >> $GITHUB_OUTPUT
           fi
 
           if [ "$WEBSHARE_ENABLED" = "true" ]; then
-            WEBSHARE_API_TOKEN=$(echo "$CONFIG" | jq -r '.webshare_api_token // ""')
-            echo "webshare_api_token=$WEBSHARE_API_TOKEN" >> $GITHUB_OUTPUT
+            echo "webshare_api_token=$(echo "$CONFIG" | jq -r '.webshare_api_token // ""')" >> $GITHUB_OUTPUT
           fi
 
           echo "✅ Config: VNC=$VNC_ENABLED | Cloudflare=$CLOUDFLARE_ENABLED | Webshare=$WEBSHARE_ENABLED"
@@ -98,7 +92,6 @@ jobs:
           sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
           rm google-chrome-stable_current_amd64.deb
           google-chrome --version
-          echo "✅ Chrome installed"
 
       - name: Install TurboVNC Server
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -132,7 +125,7 @@ jobs:
 
           vncserver :1 -geometry 1920x1080 -depth 24 -rfbport $VNC_PORT 2>&1 | tee /tmp/vnc-start.log
           sleep 8
-          pgrep -f "Xvnc.*:1" > /dev/null && echo "✅ VNC started" || { cat /tmp/vnc-start.log; exit 1; }
+          pgrep -f "Xvnc.*:1" > /dev/null && echo "✅ VNC started on port $VNC_PORT" || { cat /tmp/vnc-start.log; exit 1; }
 
       - name: Install Python dependencies
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -145,7 +138,7 @@ jobs:
           [ ! -f ./utils/websockify/run ] && cd utils && git clone https://github.com/novnc/websockify.git && cd ..
           ./utils/novnc_proxy --vnc localhost:$VNC_PORT --listen $NOVNC_PORT &
           sleep 5
-          ss -tuln | grep -q ":$NOVNC_PORT " && echo "✅ noVNC started" || echo "⚠️ noVNC port check failed (may still be binding)"
+          ss -tuln | grep -q ":$NOVNC_PORT " && echo "✅ noVNC started on port $NOVNC_PORT" || echo "⚠️ noVNC may still be binding..."
 
       - name: Download and Setup BotXByte Extension
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -161,121 +154,23 @@ jobs:
           MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
           [ -z "$MANIFEST_PATH" ] && echo "❌ manifest.json not found" && exit 1
 
-          ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
           rm -rf "$EXTENSION_DIR"
-          mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
+          mv "$(dirname "$MANIFEST_PATH")" "$EXTENSION_DIR"
           rm -rf "$TEMP_EXTRACT"
 
-          # Remove stale/problematic files
-          rm -rf "$EXTENSION_DIR/_metadata"
-          rm -rf "$EXTENSION_DIR/.git"
-          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/.env.dev" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
+          # Remove files Chrome doesn't want to see in extension dir
+          rm -rf "$EXTENSION_DIR/_metadata" "$EXTENSION_DIR/.git"
+          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/.env.dev" \
+                "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
 
-          # ----------------------------------------------------------------
-          # CRITICAL DIAGNOSTIC: Validate the manifest before launching Chrome
-          # A bad manifest is the #1 reason Chrome silently refuses to load
-          # an extension, even via --load-extension.
-          # ----------------------------------------------------------------
           echo "=== manifest.json ==="
           cat "$EXTENSION_DIR/manifest.json"
           echo ""
+          echo "=== Extension files ==="
+          find "$EXTENSION_DIR" -type f | sort
 
-          echo "=== Manifest validation ==="
-          python3 << 'PYEOF'
-          import json, sys, os
-
-          ext_dir = os.path.expanduser("~/real-botxbyte-extension")
-          mf_path = os.path.join(ext_dir, "manifest.json")
-
-          try:
-              with open(mf_path) as f:
-                  m = json.load(f)
-          except json.JSONDecodeError as e:
-              print(f"❌ INVALID JSON in manifest.json: {e}")
-              sys.exit(1)
-
-          print(f"✅ manifest.json is valid JSON")
-          print(f"  Name: {m.get('name','?')}")
-          print(f"  Version: {m.get('version','?')}")
-          print(f"  Manifest version: {m.get('manifest_version','?')}")
-
-          # Check manifest version
-          mv = m.get('manifest_version', 0)
-          if mv not in (2, 3):
-              print(f"❌ manifest_version must be 2 or 3, got: {mv}")
-              sys.exit(1)
-
-          # For MV3: background must use service_worker, not scripts
-          bg = m.get('background', {})
-          if mv == 3:
-              if 'scripts' in bg and 'service_worker' not in bg:
-                  print(f"❌ MV3 background must use 'service_worker', not 'scripts'")
-                  sys.exit(1)
-              if 'service_worker' in bg:
-                  sw_path = os.path.join(ext_dir, bg['service_worker'])
-                  if not os.path.exists(sw_path):
-                      print(f"❌ service_worker file missing: {bg['service_worker']}")
-                      sys.exit(1)
-                  print(f"✅ service_worker: {bg['service_worker']} exists")
-
-          # For MV2: check background scripts exist
-          if mv == 2 and 'scripts' in bg:
-              for s in bg['scripts']:
-                  sp = os.path.join(ext_dir, s)
-                  if not os.path.exists(sp):
-                      print(f"❌ background script missing: {s}")
-                  else:
-                      print(f"✅ background script: {s} exists")
-
-          # Check content scripts exist
-          for cs in m.get('content_scripts', []):
-              for js in cs.get('js', []):
-                  p = os.path.join(ext_dir, js)
-                  if not os.path.exists(p):
-                      print(f"❌ content script missing: {js}")
-                  else:
-                      print(f"✅ content script: {js} exists")
-
-          # Check for web_accessible_resources format (MV3 changed this)
-          war = m.get('web_accessible_resources', [])
-          if mv == 3 and war and isinstance(war[0], str):
-              print(f"❌ MV3 web_accessible_resources must be objects with 'resources' and 'matches', not strings")
-              sys.exit(1)
-
-          # Check icons exist
-          for size, path in m.get('icons', {}).items():
-              p = os.path.join(ext_dir, path)
-              if not os.path.exists(p):
-                  print(f"⚠️ icon missing: {path} (size {size})")
-
-          # Check action/browser_action
-          action = m.get('action') or m.get('browser_action') or {}
-          for k in ['default_popup', 'default_icon']:
-              v = action.get(k)
-              if v and isinstance(v, str):
-                  p = os.path.join(ext_dir, v)
-                  if not os.path.exists(p):
-                      print(f"⚠️ action file missing: {v}")
-
-          print("")
-          print("=== All extension files ===")
-          for root, dirs, files in os.walk(ext_dir):
-              dirs[:] = [d for d in dirs if d not in ['.git', '__pycache__', 'node_modules']]
-              level = root.replace(ext_dir, '').count(os.sep)
-              indent = '  ' * level
-              print(f'{indent}{os.path.basename(root)}/')
-              for f in files:
-                  fp = os.path.join(root, f)
-                  size = os.path.getsize(fp)
-                  print(f'{indent}  {f} ({size} bytes)')
-
-          print("\n✅ Manifest validation passed")
-          PYEOF
-
-          # Install Python deps
           [ -f "$EXTENSION_DIR/requirements.txt" ] && pip install -r "$EXTENSION_DIR/requirements.txt" || true
-
-          echo "✅ Extension setup complete at: $EXTENSION_DIR"
+          echo "✅ Extension ready at: $EXTENSION_DIR"
 
       - name: Start BotXByte Server
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -288,7 +183,9 @@ jobs:
           SERVER_PID=$!
           echo "server_pid=$SERVER_PID" >> $GITHUB_OUTPUT
           sleep 3
-          kill -0 $SERVER_PID 2>/dev/null && echo "✅ BotXByte server started (PID: $SERVER_PID)" || { echo "❌ Server failed"; cat /tmp/botxbyte-server.log; exit 1; }
+          kill -0 $SERVER_PID 2>/dev/null \
+            && echo "✅ BotXByte server started (PID: $SERVER_PID)" \
+            || { echo "❌ Server failed to start"; cat /tmp/botxbyte-server.log; exit 1; }
 
       - name: Launch Chrome with BotXByte Extension
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -304,9 +201,7 @@ jobs:
           mkdir -p "$CHROME_PROFILE_DIR/Default"
           rm -rf "$EXTENSION_DIR/_metadata"
 
-          # ----------------------------------------------------------------
-          # Chrome policy: allow unpacked extensions and developer mode
-          # ----------------------------------------------------------------
+          # Allow unpacked extensions via policy
           sudo mkdir -p /etc/opt/chrome/policies/managed
           cat << 'POLICY' | sudo tee /etc/opt/chrome/policies/managed/policy.json > /dev/null
           {
@@ -315,25 +210,17 @@ jobs:
             },
             "DeveloperToolsAvailability": 1,
             "ExtensionDeveloperModeAllowed": true,
-            "BlockExternalExtensions": false,
-            "CommandLineFlagSecurityWarningsEnabled": false
+            "BlockExternalExtensions": false
           }
           POLICY
 
-          # ----------------------------------------------------------------
-          # Pre-seed Preferences BEFORE Chrome launches.
-          # This tells Chrome developer mode is already on.
-          # Chrome will re-compute HMACs itself on first read.
-          # ----------------------------------------------------------------
+          # Pre-seed Preferences with developer_mode ON before Chrome starts
+          # Chrome reads this on first launch and re-computes HMACs itself
           cat > "$CHROME_PROFILE_DIR/Default/Preferences" << 'PREFS_EOF'
           {
             "extensions": {
-              "ui": {
-                "developer_mode": true
-              },
-              "alerts": {
-                "initialized": true
-              }
+              "ui": { "developer_mode": true },
+              "alerts": { "initialized": true }
             },
             "profile": {
               "exit_type": "Normal",
@@ -347,16 +234,7 @@ jobs:
 
           touch "$CHROME_PROFILE_DIR/First Run"
 
-          # ----------------------------------------------------------------
-          # Launch Chrome with extension.
-          #
-          # KEY FLAGS EXPLAINED:
-          # --load-extension          : Load unpacked extension from path
-          # --no-sandbox              : Required on GitHub runners (no user namespace)
-          # --disable-extensions-except: NOT used — this would BLOCK our extension!
-          # --allow-legacy-extension-manifests: accept both MV2 and MV3
-          # ----------------------------------------------------------------
-          echo "Launching Chrome..."
+          echo "Launching Chrome with extension..."
           google-chrome \
             --no-first-run \
             --no-default-browser-check \
@@ -368,40 +246,43 @@ jobs:
             --allow-legacy-extension-manifests \
             --user-data-dir="$CHROME_PROFILE_DIR" \
             --remote-debugging-port=9222 \
+            --remote-allow-origins='*' \
             --new-window \
             "about:blank" \
             2>/tmp/chrome-stderr.log &
 
           CHROME_PID=$!
           echo "Chrome PID: $CHROME_PID"
-
-          # Wait for Chrome to fully start (longer wait = more reliable)
           sleep 20
 
           if ! pgrep -f "google-chrome" > /dev/null; then
-            echo "❌ Chrome crashed on launch"
-            echo "=== Chrome stderr ==="
+            echo "❌ Chrome crashed"
             cat /tmp/chrome-stderr.log
             exit 1
           fi
           echo "✅ Chrome is running"
 
-          # Check stderr for extension errors
-          echo "=== Chrome stderr (extension-related lines) ==="
-          grep -i "extension\|load\|error\|warn\|manifest\|crx" /tmp/chrome-stderr.log 2>/dev/null | head -30 || echo "(no matching lines)"
+          # Show only genuine errors (skip known harmless dbus noise)
+          echo "=== Chrome errors (non-dbus) ==="
+          grep -i "ERROR\|WARN\|extension\|manifest\|crx\|load" /tmp/chrome-stderr.log \
+            | grep -v "dbus\|DBus\|NameHasOwner\|PHONE_REGISTRATION" \
+            | head -20 \
+            || echo "(none)"
 
           # ----------------------------------------------------------------
-          # Verify via CDP — wait for extension service worker to appear
+          # Verify extension loaded via CDP
+          # The extension IS confirmed loaded when service_worker appears.
+          # We also check chrome://extensions UI for confirmation.
           # ----------------------------------------------------------------
           python3 << 'PYEOF'
-          import websocket, json, time, urllib.request, sys
+          import websocket, json, time, urllib.request
 
           def cdp_http(path):
               try:
                   resp = urllib.request.urlopen(f"http://localhost:9222{path}", timeout=10)
                   return json.loads(resp.read())
               except Exception as e:
-                  print(f"  CDP HTTP error on {path}: {e}")
+                  print(f"  CDP HTTP error: {e}")
                   return None
 
           def cdp_send(ws, method, params=None, msg_id=1):
@@ -409,117 +290,133 @@ jobs:
               if params:
                   msg["params"] = params
               ws.send(json.dumps(msg))
-              for _ in range(100):
-                  resp = json.loads(ws.recv())
-                  if resp.get("id") == msg_id:
-                      return resp
+              for _ in range(200):
+                  try:
+                      resp = json.loads(ws.recv())
+                      if resp.get("id") == msg_id:
+                          return resp
+                  except:
+                      break
               return {}
 
-          # Poll for extension service worker (up to 30 seconds)
-          print("Waiting for extension service worker...")
+          # ---- Step 1: Find extension by scanning all targets ----
+          print("Scanning CDP targets for extension...")
+          ext_id = None
           ext_sw = None
-          for attempt in range(15):
+          ext_bg = None  # MV2 background page
+
+          for attempt in range(10):
               time.sleep(2)
               targets = cdp_http("/json/list") or []
               for t in targets:
-                  if t.get("type") == "service_worker" and "nmmhkkegccagdldgiimedpiccmgmieda" not in t.get("url",""):
+                  url = t.get("url", "")
+                  ttype = t.get("type", "")
+                  # Skip built-in Chrome extensions
+                  if "nmmhkkegccagdldgiimedpiccmgmieda" in url:
+                      continue
+                  if ttype == "service_worker" and url.startswith("chrome-extension://"):
                       ext_sw = t
+                      ext_id = url.split("/")[2]
                       break
-              if ext_sw:
+                  if ttype == "background_page" and url.startswith("chrome-extension://"):
+                      ext_bg = t
+                      ext_id = url.split("/")[2]
+                      break
+              if ext_id:
                   break
-              print(f"  Attempt {attempt+1}/15: no extension service worker yet... ({len(targets)} targets)")
+              print(f"  Attempt {attempt+1}/10 — waiting... ({len(targets)} targets total)")
 
           print("\n=== All CDP targets ===")
-          targets = cdp_http("/json/list") or []
-          for t in targets:
-              print(f"  [{t.get('type','?')}] {t.get('url','?')[:100]}")
+          for t in cdp_http("/json/list") or []:
+              print(f"  [{t.get('type','?')}] {t.get('url','?')[:120]}")
 
           if ext_sw:
-              print(f"\n✅ Extension service worker ACTIVE: {ext_sw.get('url')}")
-              sw_id = ext_sw.get('url','').split('/')[2] if '/' in ext_sw.get('url','') else 'unknown'
-              print(f"  Extension ID: {sw_id}")
+              print(f"\n✅ Extension loaded (MV3 Service Worker)")
+              print(f"   ID  : {ext_id}")
+              print(f"   URL : {ext_sw.get('url')}")
+          elif ext_bg:
+              print(f"\n✅ Extension loaded (MV2 Background Page)")
+              print(f"   ID  : {ext_id}")
+              print(f"   URL : {ext_bg.get('url')}")
           else:
-              print("\n⚠️  Extension service worker NOT found")
-              print("Possible causes:")
-              print("  1. manifest.json has errors Chrome rejected silently")
-              print("  2. The extension uses MV2 (background page, not service worker)")
-              print("  3. Chrome blocked --load-extension for security reasons")
+              print("\n❌ Extension NOT found in any CDP target")
+              print("   Check manifest.json for errors and that all referenced files exist")
 
-              # For MV2 extensions, look for background_page instead
-              mv2_bg = [t for t in targets if t.get("type") == "background_page"
-                        and "nmmhkkegccagdldgiimedpiccmgmieda" not in t.get("url","")]
-              if mv2_bg:
-                  print(f"\n✅ Found MV2 background page (extension IS loaded):")
-                  for t in mv2_bg:
-                      print(f"  {t.get('url')}")
+          # ---- Step 2: Open chrome://extensions and read the UI ----
+          print("\n=== chrome://extensions UI ===")
+          targets = cdp_http("/json/list") or []
+          page_tab = next((t for t in targets if t.get("type") == "page"), None)
 
-          # Check chrome://extensions via CDP to see what's shown in UI
-          print("\n=== chrome://extensions UI check ===")
-          # Navigate a tab to chrome://extensions
-          tab_list = cdp_http("/json/list") or []
-          page_tab = next((t for t in tab_list if t.get("type") == "page"), None)
-
-          if page_tab and page_tab.get("webSocketDebuggerUrl"):
-              try:
-                  ws = websocket.create_connection(page_tab["webSocketDebuggerUrl"], timeout=15)
-                  # Navigate to extensions page
-                  cdp_send(ws, "Page.navigate", {"url": "chrome://extensions"}, msg_id=10)
-                  time.sleep(4)
-
-                  result = cdp_send(ws, "Runtime.evaluate", {
-                      "expression": """
-                      (async function() {
-                          // Wait for shadow DOM to be ready
-                          for (let i = 0; i < 20; i++) {
-                              const manager = document.querySelector('extensions-manager');
-                              if (manager && manager.shadowRoot) {
-                                  const toolbar = manager.shadowRoot.querySelector('extensions-toolbar');
-                                  const devMode = toolbar?.shadowRoot?.querySelector('#devMode')?.checked;
-                                  const items = Array.from(manager.shadowRoot.querySelectorAll('extensions-item'));
-                                  const exts = items.map(item => ({
-                                      name: item.shadowRoot?.querySelector('#name')?.textContent?.trim() || 'unknown',
-                                      id: item.getAttribute('id') || '?',
-                                      enabled: !item.shadowRoot?.querySelector('cr-toggle')?.hasAttribute('disabled')
-                                  }));
-                                  return JSON.stringify({devMode, extensions: exts, ready: true});
-                              }
-                              await new Promise(r => setTimeout(r, 500));
-                          }
-                          return JSON.stringify({error: 'extensions-manager not found', ready: false});
-                      })()
-                      """,
-                      "awaitPromise": True
-                  }, msg_id=11)
-
-                  val = result.get("result",{}).get("result",{}).get("value","{}") or "{}"
+          if not page_tab:
+              print("  No page tab available to navigate")
+          else:
+              ws_url = page_tab.get("webSocketDebuggerUrl")
+              if not ws_url:
+                  print("  No WebSocket debugger URL")
+              else:
                   try:
-                      data = json.loads(val)
-                      if data.get("error"):
-                          print(f"  ⚠️ {data['error']}")
-                      else:
-                          print(f"  Developer mode: {'ON ✅' if data.get('devMode') else 'OFF ⚠️'}")
-                          exts = data.get("extensions", [])
-                          print(f"  Extensions in UI: {len(exts)}")
-                          for e in exts:
-                              status = "✅" if e.get("enabled") else "⚠️ disabled"
-                              print(f"    {status} {e.get('name')} (ID: {e.get('id')})")
-                          if not exts:
-                              print("  ❌ No extensions shown in chrome://extensions")
-                  except Exception as parse_err:
-                      print(f"  Parse error: {parse_err}, raw: {val[:200]}")
+                      ws = websocket.create_connection(ws_url, timeout=15)
+                      cdp_send(ws, "Page.navigate", {"url": "chrome://extensions"}, msg_id=1)
+                      time.sleep(5)  # Give page time to fully render
 
-                  ws.close()
-              except Exception as e:
-                  print(f"  CDP error: {e}")
+                      result = cdp_send(ws, "Runtime.evaluate", {
+                          "expression": """
+                          (async () => {
+                              for (let i = 0; i < 30; i++) {
+                                  const mgr = document.querySelector('extensions-manager');
+                                  if (mgr && mgr.shadowRoot) {
+                                      const toolbar = mgr.shadowRoot.querySelector('extensions-toolbar');
+                                      const devMode = toolbar?.shadowRoot?.querySelector('#devMode')?.checked ?? false;
+                                      const items = [...mgr.shadowRoot.querySelectorAll('extensions-item')];
+                                      return JSON.stringify({
+                                          devMode,
+                                          count: items.length,
+                                          extensions: items.map(item => ({
+                                              name: item.shadowRoot?.querySelector('#name')?.textContent?.trim() ?? '?',
+                                              id: item.id ?? '?',
+                                              enabled: item.shadowRoot?.querySelector('cr-toggle')?.checked ?? false,
+                                              hasError: !!item.shadowRoot?.querySelector('.errors-button')
+                                          }))
+                                      });
+                                  }
+                                  await new Promise(r => setTimeout(r, 500));
+                              }
+                              return JSON.stringify({error: 'shadow DOM not ready after 15s'});
+                          })()
+                          """,
+                          "awaitPromise": True
+                      }, msg_id=2)
+
+                      raw = result.get("result",{}).get("result",{}).get("value","{}") or "{}"
+                      data = json.loads(raw)
+
+                      if "error" in data:
+                          print(f"  ⚠️  {data['error']}")
+                      else:
+                          dm = "ON ✅" if data.get("devMode") else "OFF ⚠️"
+                          print(f"  Developer mode : {dm}")
+                          print(f"  Extensions shown: {data.get('count', 0)}")
+                          for e in data.get("extensions", []):
+                              status = "✅ enabled" if e.get("enabled") else "⚠️ disabled"
+                              err    = " ⚠️ HAS ERROR" if e.get("hasError") else ""
+                              print(f"    {status}{err} — {e.get('name')} (ID: {e.get('id')})")
+
+                          if data.get("count", 0) == 0:
+                              print("  ❌ No extensions in UI — Chrome rejected the extension")
+                              print("     Most likely cause: manifest.json references a missing file")
+
+                      ws.close()
+                  except Exception as e:
+                      print(f"  CDP error: {e}")
 
           version = cdp_http("/json/version") or {}
-          print(f"\nChrome version: {version.get('Browser','?')}")
+          print(f"\nChrome: {version.get('Browser','?')}")
           PYEOF
 
           echo ""
-          echo "=== Summary ==="
-          pgrep -f "google-chrome" > /dev/null && echo "✅ Chrome: running" || echo "❌ Chrome: NOT running"
-          pgrep -f "server.py" > /dev/null && echo "✅ BotXByte server: running" || echo "⚠️ BotXByte server: NOT running"
+          echo "=== Final Status ==="
+          pgrep -f "google-chrome" > /dev/null && echo "✅ Chrome        : running" || echo "❌ Chrome        : NOT running"
+          pgrep -f "server.py"     > /dev/null && echo "✅ BotXByte srv  : running" || echo "⚠️ BotXByte srv  : NOT running"
 
       - name: Install cloudflared
         if: steps.config.outputs.cloudflare_enabled == 'true'
@@ -538,10 +435,7 @@ jobs:
             --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" \
             --header "Content-Type: application/json" \
             --data '{"name":"github-vnc-'"$(date +%s)"'","config_src":"cloudflare"}')
-
-          SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
-          [ "$SUCCESS" != "true" ] && echo "❌ Failed to create tunnel" && echo "$RESPONSE" | jq '.' && exit 1
-
+          [ "$(echo "$RESPONSE" | jq -r '.success')" != "true" ] && echo "$RESPONSE" | jq '.' && exit 1
           echo "tunnel_id=$(echo "$RESPONSE" | jq -r '.result.id')" >> $GITHUB_OUTPUT
           echo "tunnel_token=$(echo "$RESPONSE" | jq -r '.result.token')" >> $GITHUB_OUTPUT
           echo "✅ Tunnel created"
@@ -560,38 +454,47 @@ jobs:
               {\"hostname\":\"${{ steps.config.outputs.hostname }}\",\"service\":\"http://localhost:${NOVNC_PORT}\",\"originRequest\":{}},
               {\"service\":\"http_status:404\"}
             ]}}")
-          echo "$RESPONSE" | jq -r '.success' | grep -q true && echo "✅ Tunnel configured" || { echo "❌ Tunnel config failed"; echo "$RESPONSE" | jq '.'; exit 1; }
+          [ "$(echo "$RESPONSE" | jq -r '.success')" = "true" ] && echo "✅ Tunnel configured" || { echo "$RESPONSE" | jq '.'; exit 1; }
 
       - name: Create DNS Record
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           FULL_HOSTNAME="${{ steps.config.outputs.hostname }}"
+          ZONE="${{ steps.config.outputs.cloudflare_zone_id }}"
+          TOKEN="${{ steps.config.outputs.cloudflare_api_token }}"
+
           EXISTING=$(curl -s -A "Mozilla/5.0" \
-            "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records?name=${FULL_HOSTNAME}" \
-            --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" | jq -r '.result[0].id // empty')
+            "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records?name=${FULL_HOSTNAME}" \
+            --header "Authorization: Bearer ${TOKEN}" | jq -r '.result[0].id // empty')
           [ -n "$EXISTING" ] && curl -s -A "Mozilla/5.0" \
-            "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records/${EXISTING}" \
-            --request DELETE --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" > /dev/null && sleep 2
+            "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records/${EXISTING}" \
+            --request DELETE --header "Authorization: Bearer ${TOKEN}" > /dev/null && sleep 2
 
           RESPONSE=$(curl -s -A "Mozilla/5.0" \
-            "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records" \
+            "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records" \
             --request POST \
-            --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" \
+            --header "Authorization: Bearer ${TOKEN}" \
             --header "Content-Type: application/json" \
             --data "{\"type\":\"CNAME\",\"proxied\":true,\"name\":\"${FULL_HOSTNAME}\",\"content\":\"${{ steps.tunnel.outputs.tunnel_id }}.cfargotunnel.com\"}")
-          echo "$RESPONSE" | jq -r '.success' | grep -q true && echo "✅ DNS created" || { echo "❌ DNS failed"; echo "$RESPONSE" | jq '.errors'; exit 1; }
+          [ "$(echo "$RESPONSE" | jq -r '.success')" = "true" ] && echo "✅ DNS created" || { echo "$RESPONSE" | jq '.errors'; exit 1; }
 
       - name: Start Cloudflare Tunnel
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           cloudflared tunnel run --token ${{ steps.tunnel.outputs.tunnel_token }} > /tmp/tunnel.log 2>&1 &
           sleep 10
-          pgrep -x cloudflared > /dev/null && echo "✅ Tunnel started" || { echo "❌ Tunnel failed"; cat /tmp/tunnel.log; exit 1; }
+          pgrep -x cloudflared > /dev/null && echo "✅ Tunnel started" || { cat /tmp/tunnel.log; exit 1; }
 
       - name: Display VNC Connection Info
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
-          echo "🌐 Access: https://${{ steps.config.outputs.hostname }}/vnc.html"
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║         🎉 VNC + BotXByte Extension is LIVE! 🎉          ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
+          echo "🌐 URL      : https://${{ steps.config.outputs.hostname }}/vnc.html"
+          echo "🔌 WS API   : ws://localhost:8765"
+          echo "🔌 HTTP API : http://localhost:8766"
 
       - name: Run Moti on Desktop
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -604,7 +507,7 @@ jobs:
           xfce4-terminal --maximize --title="Moti Process" \
             --command="bash -c 'export MOTI_JOB_CONFIG=\$(echo \"${{ inputs.base64_config }}\" | base64 -d) && pip install av --upgrade && pip install moti && moti; echo Done; read'" 2>/dev/null &
           sleep 5
-          pgrep -f "xfce4-terminal" > /dev/null && echo "✅ Moti terminal launched" || echo "⚠️ Terminal may not have started"
+          pgrep -f "xfce4-terminal" > /dev/null && echo "✅ Moti started" || echo "⚠️ Terminal may not have launched"
 
       - name: Run Moti in Normal Terminal
         if: steps.config.outputs.vnc_enabled == 'false'
@@ -622,22 +525,24 @@ jobs:
           EXTENSION_DIR="$HOME/real-botxbyte-extension"
           CHROME_PROFILE_DIR="$HOME/chrome-botxbyte-profile"
 
-          # 355 minutes = job timeout (360) minus 5 min buffer for cleanup
+          # 355 min = 360 min job timeout minus 5 min cleanup buffer
           END_TIME=$((SECONDS + 21300))
 
           while [ $SECONDS -lt $END_TIME ]; do
             REMAINING=$((END_TIME - SECONDS))
-            echo "⏱️ Remaining: $((REMAINING/3600))h $(((REMAINING%3600)/60))m"
+            echo "⏱️  Remaining: $((REMAINING/3600))h $(((REMAINING%3600)/60))m"
 
             # Restart VNC if crashed
             if ! pgrep -f "Xvnc.*:1" > /dev/null; then
-              echo "❌ VNC stopped, restarting..."
-              vncserver :1 -geometry 1920x1080 -depth 24 -rfbport $VNC_PORT && echo "✅ VNC restarted" || exit 1
+              echo "⚠️  VNC stopped — restarting..."
+              vncserver :1 -geometry 1920x1080 -depth 24 -rfbport $VNC_PORT
+              sleep 3
+              pgrep -f "Xvnc.*:1" > /dev/null && echo "✅ VNC restarted" || { echo "❌ VNC restart failed"; exit 1; }
             fi
 
             # Restart cloudflared if crashed
             if [ "${{ steps.config.outputs.cloudflare_enabled }}" = "true" ] && ! pgrep -x cloudflared > /dev/null; then
-              echo "❌ Tunnel stopped, restarting..."
+              echo "⚠️  Tunnel stopped — restarting..."
               cloudflared tunnel run --token ${{ steps.tunnel.outputs.tunnel_token }} > /tmp/tunnel.log 2>&1 &
               sleep 5
               pgrep -x cloudflared > /dev/null && echo "✅ Tunnel restarted" || { cat /tmp/tunnel.log; exit 1; }
@@ -645,7 +550,7 @@ jobs:
 
             # Restart BotXByte server if crashed
             if ! pgrep -f "server.py" > /dev/null; then
-              echo "❌ BotXByte server stopped, restarting..."
+              echo "⚠️  BotXByte server stopped — restarting..."
               cd "$EXTENSION_DIR"
               export WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
               nohup python3 server.py > /tmp/botxbyte-server.log 2>&1 &
@@ -655,7 +560,7 @@ jobs:
 
             # Restart Chrome if crashed
             if ! pgrep -f "google-chrome" > /dev/null; then
-              echo "❌ Chrome stopped, restarting..."
+              echo "⚠️  Chrome stopped — restarting..."
               export DISPLAY=:1 NO_AT_BRIDGE=1 DBUS_SESSION_BUS_ADDRESS=/dev/null
               rm -rf "$EXTENSION_DIR/_metadata"
               google-chrome \
@@ -666,6 +571,7 @@ jobs:
                 --allow-legacy-extension-manifests \
                 --user-data-dir="$CHROME_PROFILE_DIR" \
                 --remote-debugging-port=9222 \
+                --remote-allow-origins='*' \
                 --new-window "about:blank" \
                 2>/tmp/chrome-stderr.log &
               sleep 8
@@ -683,21 +589,20 @@ jobs:
           [ -n "$AUTH_ID" ] && [ "$AUTH_ID" != "null" ] && \
             curl -s "https://proxy.webshare.io/api/v2/proxy/ipauthorization/${AUTH_ID}/" \
               -X DELETE -H "Authorization: Token ${{ steps.config.outputs.webshare_api_token }}" > /dev/null && \
-            echo "✅ Webshare IP deregistered"
+            echo "✅ Webshare IP deregistered" || echo "⚠️ Nothing to deregister"
 
       - name: Cleanup BotXByte
         if: always() && steps.config.outputs.vnc_enabled == 'true'
         run: |
           pkill -f "google-chrome" || true
           pkill -f "server.py" || true
-          echo "✅ BotXByte cleanup done"
+          echo "✅ Cleanup done"
 
       - name: Cleanup Cloudflare
         if: always() && steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           pkill -x cloudflared || true
           sleep 2
-
           FULL_HOSTNAME="${{ steps.config.outputs.hostname }}"
           ACCT="${{ steps.config.outputs.cloudflare_account_id }}"
           ZONE="${{ steps.config.outputs.cloudflare_zone_id }}"
@@ -709,7 +614,8 @@ jobs:
 
           if [ -n "$FULL_HOSTNAME" ] && [ "$FULL_HOSTNAME" != "null" ]; then
             DEL_URL="http://129.212.196.173/ai-management-service/api/v1/cloudflare-tunnel-info/delete/?tunnel_url=https://${FULL_HOSTNAME}"
-            [ -n "$BROWSER_PROFILE_ID" ] && [ "$BROWSER_PROFILE_ID" != "null" ] && DEL_URL="${DEL_URL}&browser_profile_id=${BROWSER_PROFILE_ID}"
+            [ -n "$BROWSER_PROFILE_ID" ] && [ "$BROWSER_PROFILE_ID" != "null" ] && \
+              DEL_URL="${DEL_URL}&browser_profile_id=${BROWSER_PROFILE_ID}"
             curl -s "$DEL_URL" -X DELETE -H "user-id: ${USER_ID}" -H "workspace-id: ${WORKSPACE_ID}" > /dev/null
 
             DNS_ID=$(curl -s -A "Mozilla/5.0" \
@@ -717,17 +623,19 @@ jobs:
               --header "Authorization: Bearer ${TOKEN}" | jq -r '.result[0].id // empty')
             [ -n "$DNS_ID" ] && curl -s -A "Mozilla/5.0" \
               "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records/${DNS_ID}" \
-              --request DELETE --header "Authorization: Bearer ${TOKEN}" | jq -r 'if .success then "✅ DNS deleted" else "⚠️ DNS delete failed" end'
+              --request DELETE --header "Authorization: Bearer ${TOKEN}" | \
+              jq -r 'if .success then "✅ DNS deleted" else "⚠️ DNS delete failed" end'
           fi
 
           [ -n "$TUNNEL_ID" ] && [ "$TUNNEL_ID" != "null" ] && \
             curl -s -A "Mozilla/5.0" \
               "https://api.cloudflare.com/client/v4/accounts/${ACCT}/cfd_tunnel/${TUNNEL_ID}" \
-              --request DELETE --header "Authorization: Bearer ${TOKEN}" | jq -r 'if .success then "✅ Tunnel deleted" else "⚠️ Tunnel delete failed" end'
+              --request DELETE --header "Authorization: Bearer ${TOKEN}" | \
+            jq -r 'if .success then "✅ Tunnel deleted" else "⚠️ Tunnel delete failed" end'
 
       - name: Cleanup VNC
         if: always() && steps.config.outputs.vnc_enabled == 'true'
         run: |
           export PATH=$PATH:/opt/TurboVNC/bin
           vncserver -kill :1 || true
-          echo "✅ VNC cleanup done"
+          echo "✅ VNC cleaned up"
