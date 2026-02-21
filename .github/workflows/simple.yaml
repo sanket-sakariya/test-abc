@@ -593,14 +593,28 @@ jobs:
 
           # ================================================================
           # PHASE 3: Kill Chrome, relaunch WITH the extension loaded
-          # Developer mode is now properly saved with correct HMACs
           # ================================================================
           echo "Phase 3: Restarting Chrome with extension..."
 
-          pkill -f "google-chrome" 2>/dev/null || true
+          # 1. Give Chrome time to flush the Developer Mode preference to disk
           sleep 3
 
-          # Mark clean exit to avoid "Chrome didn't shut down correctly" dialog
+          # 2. Attempt a graceful kill first, then aggressive
+          pkill -15 -f "chrome" 2>/dev/null || true
+          pkill -15 -f "google-chrome" 2>/dev/null || true
+          sleep 3
+
+          # Force kill any lingering zombie child processes
+          pkill -9 -f "chrome" 2>/dev/null || true
+          pkill -9 -f "google-chrome" 2>/dev/null || true
+          sleep 2
+
+          # 3. Destroy profile locks that prevent new flags from being read
+          rm -f "$CHROME_PROFILE_DIR/SingletonLock"
+          rm -f "$CHROME_PROFILE_DIR/SingletonCookie"
+          rm -f "$CHROME_PROFILE_DIR/SingletonSocket"
+
+          # 4. Mark clean exit to avoid "Chrome didn't shut down correctly" dialog
           python3 -c "
           import json, os
           pf = os.path.expanduser('~/chrome-botxbyte-profile/Default/Preferences')
@@ -609,9 +623,10 @@ jobs:
               p.setdefault('profile', {})['exited_cleanly'] = True
               p.setdefault('profile', {})['exit_type'] = 'Normal'
               with open(pf, 'w') as f: json.dump(p, f, indent=2)
-              print('  Clean exit set')
+              print('  Clean exit set in Preferences')
           "
 
+          # 5. Relaunch with extra debugging flags
           google-chrome \
             --no-first-run \
             --no-default-browser-check \
@@ -623,19 +638,24 @@ jobs:
             --user-data-dir="$CHROME_PROFILE_DIR" \
             --remote-debugging-port=9222 \
             --remote-allow-origins=* \
+            --enable-logging \
+            --v=1 \
             --new-window \
             "chrome://extensions" \
-            2>/tmp/chrome-stderr.log &
+            > /tmp/chrome-launch.log 2>&1 &
 
           CHROME_PID=$!
           echo "  Chrome PID: $CHROME_PID"
           sleep 12
 
-          if ! pgrep -f "google-chrome" > /dev/null; then
+          if ! pgrep -f "chrome" > /dev/null; then
             echo "❌ Chrome failed to relaunch"
-            tail -20 /tmp/chrome-stderr.log 2>/dev/null || true
+            tail -30 /tmp/chrome-launch.log
             exit 1
           fi
+
+          # Print the first few lines of logs to catch extension load errors
+          grep -i "extension" /tmp/chrome-launch.log | head -10 || true
 
           # ================================================================
           # PHASE 4: Verify extension is loaded, visible, and active
