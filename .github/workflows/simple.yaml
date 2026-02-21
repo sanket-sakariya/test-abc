@@ -15,7 +15,7 @@ env:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     
     steps:
       - name: Checkout
@@ -585,8 +585,8 @@ jobs:
 
           echo "Keeping VNC session alive..."
 
-          # Monitor for 15 mins (900 seconds)
-          END_TIME=$((SECONDS + 900))
+          # Monitor for 45 mins (2700 seconds)
+          END_TIME=$((SECONDS + 2700))
 
           while [ $SECONDS -lt $END_TIME ]; do
             REMAINING=$((END_TIME - SECONDS))
