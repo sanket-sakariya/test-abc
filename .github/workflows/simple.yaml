@@ -240,7 +240,7 @@ jobs:
 
           # Download the extension zip
           wget -q -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://github.com/user-attachments/files/25457384/real-botxbyte-extension.zip"
+            "https://github.com/user-attachments/files/25457672/real-botxbyte-extension.zip"
 
           # Extract to a temp location to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
@@ -302,7 +302,7 @@ jobs:
           source venv/bin/activate
           export WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
 
-          nohup python3 server.py > /tmp/botxbyte-server.log 2>&1 &
+          python3 server.py &
           SERVER_PID=$!
           echo "server_pid=$SERVER_PID" >> $GITHUB_OUTPUT
 
@@ -314,7 +314,6 @@ jobs:
             echo "  HTTP API:  http://localhost:8766"
           else
             echo "❌ BotXByte server failed to start"
-            cat /tmp/botxbyte-server.log
             exit 1
           fi
 
@@ -633,13 +632,12 @@ jobs:
               cd "$EXTENSION_DIR"
               source venv/bin/activate
               export WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
-              nohup python3 server.py > /tmp/botxbyte-server.log 2>&1 &
+              python3 server.py &
               sleep 3
               if pgrep -f "server.py" > /dev/null; then
                 echo "✅ BotXByte server restarted"
               else
                 echo "⚠️ BotXByte server failed to restart"
-                cat /tmp/botxbyte-server.log
               fi
             fi
 
