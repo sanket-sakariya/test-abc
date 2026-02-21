@@ -506,6 +506,37 @@ jobs:
           
           echo "✅ Cloudflare Tunnel started"
 
+      - name: Register Tunnel URL with Backend
+        if: steps.config.outputs.cloudflare_enabled == 'true'
+        run: |
+          echo "Registering tunnel URL with backend..."
+
+          FULL_HOSTNAME="${{ steps.config.outputs.hostname }}"
+          TUNNEL_URL="https://${FULL_HOSTNAME}"
+          USER_ID="${{ steps.config.outputs.user_id }}"
+          WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
+          BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+
+          RESPONSE=$(curl -s "http://129.212.196.173/ai-management-service/api/v1/cloudflare-tunnel-info/create/" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "user-id: ${USER_ID}" \
+            -H "workspace-id: ${WORKSPACE_ID}" \
+            -d "{
+              \"tunnel_url\": \"${TUNNEL_URL}\",
+              \"browser_profile_id\": \"${BROWSER_PROFILE_ID}\",
+              \"status\": \"created\",
+              \"is_active\": true
+            }")
+
+          SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
+          if [ "$SUCCESS" = "true" ]; then
+            echo "✅ Tunnel URL registered: ${TUNNEL_URL}"
+          else
+            echo "⚠️ Failed to register tunnel URL (non-fatal)"
+            echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
+          fi
+
       - name: Display VNC Connection Info
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
