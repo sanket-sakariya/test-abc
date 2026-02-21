@@ -15,7 +15,7 @@ env:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
     
     steps:
       - name: Checkout
@@ -137,6 +137,16 @@ jobs:
             xubuntu-icon-theme \
             xubuntu-wallpapers \
             gnome-icon-theme
+
+      - name: Install Google Chrome
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          echo "Installing Google Chrome..."
+          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
+          rm google-chrome-stable_current_amd64.deb
+          google-chrome --version
+          echo "✅ Google Chrome installed"
 
       - name: Install TurboVNC Server
         if: steps.config.outputs.vnc_enabled == 'true'
