@@ -75,6 +75,22 @@ jobs:
             echo "  Browser Profile ID: $BROWSER_PROFILE_ID"
           fi
           
+          # Parse Wasabi S3 credentials for browser profile persistence
+          WASABI_ACCESS_KEY=$(echo "$CONFIG" | jq -r '.wasabi_access_key // ""')
+          WASABI_SECRET_KEY=$(echo "$CONFIG" | jq -r '.wasabi_secret_key // ""')
+          WASABI_BUCKET=$(echo "$CONFIG" | jq -r '.wasabi_bucket // ""')
+          WASABI_ENDPOINT=$(echo "$CONFIG" | jq -r '.wasabi_endpoint // "https://s3.wasabisys.com"')
+          WASABI_REGION=$(echo "$CONFIG" | jq -r '.wasabi_region // "us-east-1"')
+          echo "wasabi_access_key=$WASABI_ACCESS_KEY" >> $GITHUB_OUTPUT
+          echo "wasabi_secret_key=$WASABI_SECRET_KEY" >> $GITHUB_OUTPUT
+          echo "wasabi_bucket=$WASABI_BUCKET" >> $GITHUB_OUTPUT
+          echo "wasabi_endpoint=$WASABI_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "wasabi_region=$WASABI_REGION" >> $GITHUB_OUTPUT
+
+          if [ -n "$WASABI_ACCESS_KEY" ] && [ "$WASABI_ACCESS_KEY" != "" ]; then
+            echo "✅ Wasabi Config Loaded (Bucket: $WASABI_BUCKET)"
+          fi
+
           # Parse Webshare-related values if Webshare is enabled
           if [ "$WEBSHARE_ENABLED" = "true" ]; then
             WEBSHARE_API_TOKEN=$(echo "$CONFIG" | jq -r '.webshare_api_token // ""')
@@ -317,10 +333,91 @@ jobs:
             exit 1
           fi
 
+      - name: Install AWS CLI (for Wasabi S3)
+        if: steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        run: |
+          echo "Installing AWS CLI for Wasabi S3 access..."
+          sudo apt-get install -y awscli
+
+          # Configure AWS CLI for Wasabi
+          mkdir -p ~/.aws
+          cat > ~/.aws/credentials << EOF
+          [default]
+          aws_access_key_id = ${{ steps.config.outputs.wasabi_access_key }}
+          aws_secret_access_key = ${{ steps.config.outputs.wasabi_secret_key }}
+          EOF
+
+          cat > ~/.aws/config << EOF
+          [default]
+          region = ${{ steps.config.outputs.wasabi_region }}
+          EOF
+
+          echo "✅ AWS CLI configured for Wasabi"
+
+      - name: Setup Browser Profile
+        if: steps.config.outputs.vnc_enabled == 'true'
+        id: browser_profile
+        run: |
+          BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          WASABI_BUCKET="${{ steps.config.outputs.wasabi_bucket }}"
+          WASABI_ENDPOINT="${{ steps.config.outputs.wasabi_endpoint }}"
+          PROFILE_DIR="$HOME/browser-profiles/${BROWSER_PROFILE_ID}"
+          WASABI_KEY="browser-profiles/${BROWSER_PROFILE_ID}.zip"
+
+          echo "browser_profile_dir=$PROFILE_DIR" >> $GITHUB_OUTPUT
+
+          mkdir -p "$HOME/browser-profiles"
+
+          PROFILE_EXISTS="false"
+
+          # Check if browser profile exists in Wasabi
+          if [ -n "$WASABI_BUCKET" ] && [ "$WASABI_BUCKET" != "" ] && [ -n "$BROWSER_PROFILE_ID" ] && [ "$BROWSER_PROFILE_ID" != "" ]; then
+            echo "Checking Wasabi for existing browser profile: $WASABI_KEY"
+
+            if aws s3 ls "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT" 2>/dev/null; then
+              echo "✅ Browser profile found in Wasabi! Downloading..."
+              PROFILE_EXISTS="true"
+
+              # Download the zip
+              aws s3 cp "s3://${WASABI_BUCKET}/${WASABI_KEY}" "/tmp/${BROWSER_PROFILE_ID}.zip" \
+                --endpoint-url "$WASABI_ENDPOINT"
+
+              echo "Extracting browser profile..."
+              unzip -o "/tmp/${BROWSER_PROFILE_ID}.zip" -d "$HOME/browser-profiles/"
+              rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
+
+              if [ -d "$PROFILE_DIR" ]; then
+                echo "✅ Browser profile extracted to: $PROFILE_DIR"
+                echo "  Profile size: $(du -sh "$PROFILE_DIR" | cut -f1)"
+              else
+                echo "⚠️ Extraction did not produce expected directory, creating fresh profile"
+                PROFILE_EXISTS="false"
+              fi
+            else
+              echo "No existing browser profile found in Wasabi"
+            fi
+          else
+            echo "⚠️ Wasabi not configured or no browser_profile_id, using fresh profile"
+          fi
+
+          # If no profile exists, create a fresh one
+          if [ "$PROFILE_EXISTS" = "false" ]; then
+            echo "Creating fresh browser profile: $PROFILE_DIR"
+            mkdir -p "$PROFILE_DIR"
+            echo "✅ Fresh browser profile directory created"
+          fi
+
+          echo "profile_exists=$PROFILE_EXISTS" >> $GITHUB_OUTPUT
+          echo "Browser Profile ID: $BROWSER_PROFILE_ID"
+          echo "Profile Directory: $PROFILE_DIR"
+
       - name: Open Chrome on Desktop
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
-          echo "Opening Chrome on VNC desktop..."
+          echo "Opening Chrome on VNC desktop with browser profile..."
+
+          PROFILE_DIR="${{ steps.browser_profile.outputs.browser_profile_dir }}"
+          echo "Using profile directory: $PROFILE_DIR"
 
           export DISPLAY=:1
           export NO_AT_BRIDGE=1
@@ -332,6 +429,7 @@ jobs:
             --disable-gpu \
             --no-sandbox \
             --disable-dev-shm-usage \
+            --user-data-dir="$PROFILE_DIR" \
             2>/tmp/chrome-stderr.log &
 
           CHROME_PID=$!
@@ -339,7 +437,7 @@ jobs:
           sleep 5
 
           if pgrep -f "chrome" > /dev/null; then
-            echo "✅ Chrome is running"
+            echo "✅ Chrome is running with persistent profile"
           else
             echo "❌ Chrome failed to launch"
             tail -20 /tmp/chrome-stderr.log 2>/dev/null || true
@@ -646,12 +744,14 @@ jobs:
               echo "❌ Chrome stopped! Restarting..."
               export DISPLAY=:1
               export NO_AT_BRIDGE=1
+              PROFILE_DIR="${{ steps.browser_profile.outputs.browser_profile_dir }}"
               google-chrome \
                 --no-first-run \
                 --no-default-browser-check \
                 --disable-gpu \
                 --no-sandbox \
                 --disable-dev-shm-usage \
+                --user-data-dir="$PROFILE_DIR" \
                 2>/tmp/chrome-stderr.log &
               sleep 5
               if pgrep -f "google-chrome" > /dev/null; then
@@ -679,6 +779,52 @@ jobs:
 
           sleep 2
           echo "✅ BotXByte cleanup complete"
+
+      - name: Upload Browser Profile to Wasabi
+        if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        run: |
+          echo "Uploading browser profile to Wasabi..."
+
+          BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          WASABI_BUCKET="${{ steps.config.outputs.wasabi_bucket }}"
+          WASABI_ENDPOINT="${{ steps.config.outputs.wasabi_endpoint }}"
+          PROFILE_DIR="$HOME/browser-profiles/${BROWSER_PROFILE_ID}"
+          WASABI_KEY="browser-profiles/${BROWSER_PROFILE_ID}.zip"
+
+          if [ -z "$BROWSER_PROFILE_ID" ] || [ "$BROWSER_PROFILE_ID" = "" ]; then
+            echo "⚠️ No browser_profile_id, skipping upload"
+            exit 0
+          fi
+
+          if [ ! -d "$PROFILE_DIR" ]; then
+            echo "⚠️ Browser profile directory not found: $PROFILE_DIR, skipping upload"
+            exit 0
+          fi
+
+          echo "Zipping browser profile: $PROFILE_DIR"
+          echo "  Profile size before zip: $(du -sh "$PROFILE_DIR" | cut -f1)"
+
+          cd "$HOME/browser-profiles"
+          zip -r "/tmp/${BROWSER_PROFILE_ID}.zip" "${BROWSER_PROFILE_ID}/" -x "*/SingletonLock" "*/SingletonCookie" "*/SingletonSocket"
+
+          ZIP_SIZE=$(du -sh "/tmp/${BROWSER_PROFILE_ID}.zip" | cut -f1)
+          echo "  Zip size: $ZIP_SIZE"
+
+          echo "Uploading to Wasabi: s3://${WASABI_BUCKET}/${WASABI_KEY}"
+          aws s3 cp "/tmp/${BROWSER_PROFILE_ID}.zip" "s3://${WASABI_BUCKET}/${WASABI_KEY}" \
+            --endpoint-url "$WASABI_ENDPOINT"
+
+          if [ $? -eq 0 ]; then
+            echo "✅ Browser profile uploaded to Wasabi successfully"
+            echo "  Bucket: $WASABI_BUCKET"
+            echo "  Key: $WASABI_KEY"
+            echo "  Size: $ZIP_SIZE"
+          else
+            echo "❌ Failed to upload browser profile to Wasabi"
+          fi
+
+          rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
+          echo "✅ Browser profile upload cleanup complete"
 
       - name: Cleanup Webshare IP Authorization
         if: always() && steps.config.outputs.webshare_enabled == 'true'
