@@ -75,7 +75,8 @@ jobs:
             echo "  Browser Profile ID: $BROWSER_PROFILE_ID"
           fi
           
-          # Parse Wasabi S3 credentials for browser profile persistence
+          # Parse Wasabi S3
+          #credentials for browser profile persistence
           WASABI_ACCESS_KEY=$(echo "$CONFIG" | jq -r '.wasabi_access_key // ""')
           WASABI_SECRET_KEY=$(echo "$CONFIG" | jq -r '.wasabi_secret_key // ""')
           WASABI_BUCKET=$(echo "$CONFIG" | jq -r '.wasabi_bucket // ""')
@@ -333,30 +334,13 @@ jobs:
             exit 1
           fi
 
-      - name: Install AWS CLI (for Wasabi S3)
-        if: steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
-        run: |
-          echo "Installing AWS CLI for Wasabi S3 access..."
-          sudo apt-get install -y awscli
-
-          # Configure AWS CLI for Wasabi
-          mkdir -p ~/.aws
-          cat > ~/.aws/credentials << EOF
-          [default]
-          aws_access_key_id = ${{ steps.config.outputs.wasabi_access_key }}
-          aws_secret_access_key = ${{ steps.config.outputs.wasabi_secret_key }}
-          EOF
-
-          cat > ~/.aws/config << EOF
-          [default]
-          region = ${{ steps.config.outputs.wasabi_region }}
-          EOF
-
-          echo "✅ AWS CLI configured for Wasabi"
-
       - name: Setup Browser Profile
         if: steps.config.outputs.vnc_enabled == 'true'
         id: browser_profile
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.config.outputs.wasabi_secret_key }}
+          AWS_DEFAULT_REGION: ${{ steps.config.outputs.wasabi_region }}
         run: |
           BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
           WASABI_BUCKET="${{ steps.config.outputs.wasabi_bucket }}"
@@ -782,6 +766,10 @@ jobs:
 
       - name: Upload Browser Profile to Wasabi
         if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.config.outputs.wasabi_secret_key }}
+          AWS_DEFAULT_REGION: ${{ steps.config.outputs.wasabi_region }}
         run: |
           echo "Uploading browser profile to Wasabi..."
 
@@ -791,6 +779,13 @@ jobs:
           PROFILE_DIR="$HOME/browser-profiles/${BROWSER_PROFILE_ID}"
           WASABI_KEY="browser-profiles/${BROWSER_PROFILE_ID}.zip"
 
+          # Debug: verify credentials are available
+          echo "  AWS_ACCESS_KEY_ID set: $([ -n "$AWS_ACCESS_KEY_ID" ] && echo 'yes' || echo 'no')"
+          echo "  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION"
+          echo "  Wasabi Endpoint: $WASABI_ENDPOINT"
+          echo "  Wasabi Bucket: $WASABI_BUCKET"
+          echo "  Browser Profile ID: $BROWSER_PROFILE_ID"
+
           if [ -z "$BROWSER_PROFILE_ID" ] || [ "$BROWSER_PROFILE_ID" = "" ]; then
             echo "⚠️ No browser_profile_id, skipping upload"
             exit 0
@@ -798,6 +793,7 @@ jobs:
 
           if [ ! -d "$PROFILE_DIR" ]; then
             echo "⚠️ Browser profile directory not found: $PROFILE_DIR, skipping upload"
+            ls -la "$HOME/browser-profiles/" 2>/dev/null || echo "  browser-profiles dir does not exist"
             exit 0
           fi
 
@@ -814,17 +810,12 @@ jobs:
           aws s3 cp "/tmp/${BROWSER_PROFILE_ID}.zip" "s3://${WASABI_BUCKET}/${WASABI_KEY}" \
             --endpoint-url "$WASABI_ENDPOINT"
 
-          if [ $? -eq 0 ]; then
-            echo "✅ Browser profile uploaded to Wasabi successfully"
-            echo "  Bucket: $WASABI_BUCKET"
-            echo "  Key: $WASABI_KEY"
-            echo "  Size: $ZIP_SIZE"
-          else
-            echo "❌ Failed to upload browser profile to Wasabi"
-          fi
+          echo "✅ Browser profile uploaded to Wasabi successfully"
+          echo "  Bucket: $WASABI_BUCKET"
+          echo "  Key: $WASABI_KEY"
+          echo "  Size: $ZIP_SIZE"
 
           rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
-          echo "✅ Browser profile upload cleanup complete"
 
       - name: Cleanup Webshare IP Authorization
         if: always() && steps.config.outputs.webshare_enabled == 'true'
