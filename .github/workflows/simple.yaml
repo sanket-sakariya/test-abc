@@ -110,23 +110,38 @@ jobs:
       - name: Register IP with Webshare
         if: steps.config.outputs.webshare_enabled == 'true'
         id: webshare
+        timeout-minutes: 2
         run: |
           echo "Registering IP with Webshare..."
-          
-          # Get current public IP
-          PUBLIC_IP=$(curl -s 'https://api.ipify.org?format=json' | jq -r '.ip')
+
+          # Get current public IP (with timeout and retry)
+          PUBLIC_IP=""
+          for attempt in 1 2 3; do
+            PUBLIC_IP=$(curl -s --connect-timeout 10 --max-time 15 'https://api.ipify.org?format=json' | jq -r '.ip // empty')
+            if [ -n "$PUBLIC_IP" ]; then
+              break
+            fi
+            echo "Retrying IP fetch... ($attempt/3)"
+            sleep 2
+          done
+
+          if [ -z "$PUBLIC_IP" ]; then
+            echo "⚠️ Failed to get public IP, skipping Webshare registration"
+            exit 0
+          fi
           echo "Public IP: $PUBLIC_IP"
-          
+
           # Register IP with Webshare
-          RESPONSE=$(curl -s "https://proxy.webshare.io/api/v2/proxy/ipauthorization/" \
+          RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            "https://proxy.webshare.io/api/v2/proxy/ipauthorization/" \
             -X POST \
             -d "{\"ip_address\": \"$PUBLIC_IP\"}" \
             -H "Content-Type: application/json" \
             -H "Authorization: Token ${{ steps.config.outputs.webshare_api_token }}")
-          
+
           # Extract authorization ID
           AUTH_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
-          
+
           if [ -n "$AUTH_ID" ]; then
             echo "webshare_auth_id=$AUTH_ID" >> $GITHUB_OUTPUT
             echo "✅ IP registered with Webshare (Auth ID: $AUTH_ID)"
@@ -497,7 +512,8 @@ jobs:
         run: |
           echo "Creating Cloudflare Tunnel..."
           
-          RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel" \
             --request POST \
             --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" \
@@ -532,7 +548,8 @@ jobs:
         run: |
           echo "Configuring tunnel for noVNC..."
           
-          RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel/${{ steps.tunnel.outputs.tunnel_id }}/configurations" \
             --request PUT \
             --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" \
@@ -584,7 +601,8 @@ jobs:
           echo "Target: ${{ steps.tunnel.outputs.tunnel_id }}.cfargotunnel.com"
           
           # Check for existing DNS record
-          EXISTING_RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          EXISTING_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records?name=${FULL_HOSTNAME}" \
             --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
           
@@ -595,7 +613,8 @@ jobs:
           
           if [ -n "$EXISTING" ]; then
             echo "⚠️ DNS record already exists (ID: $EXISTING), deleting..."
-            DELETE_RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            DELETE_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
               "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records/${EXISTING}" \
               --request DELETE \
               --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
@@ -603,10 +622,11 @@ jobs:
             echo "$DELETE_RESPONSE" | jq '.'
             sleep 2
           fi
-          
+
           # Create new DNS record
           echo "Creating new DNS record..."
-          RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+          RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records" \
             --request POST \
             --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" \
@@ -679,7 +699,8 @@ jobs:
 
           echo "Request body: $BODY"
 
-          RESPONSE=$(curl -s "http://129.212.196.173/ai-management-service/api/v1/cloudflare-tunnel-info/create/" \
+          RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+            "http://129.212.196.173/ai-management-service/api/v1/cloudflare-tunnel-info/create/" \
             -X POST \
             -H "Content-Type: application/json" \
             -H "user-id: ${USER_ID}" \
@@ -878,7 +899,8 @@ jobs:
           echo "Deregistering IP from Webshare..."
           
           if [ -n "${{ steps.webshare.outputs.webshare_auth_id }}" ] && [ "${{ steps.webshare.outputs.webshare_auth_id }}" != "null" ]; then
-            DELETE_RESPONSE=$(curl -s "https://proxy.webshare.io/api/v2/proxy/ipauthorization/${{ steps.webshare.outputs.webshare_auth_id }}/" \
+            DELETE_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+              "https://proxy.webshare.io/api/v2/proxy/ipauthorization/${{ steps.webshare.outputs.webshare_auth_id }}/" \
               -X DELETE \
               -H "Authorization: Token ${{ steps.config.outputs.webshare_api_token }}")
             
@@ -921,7 +943,7 @@ jobs:
               DELETE_URL="${DELETE_URL}&browser_profile_id=${BROWSER_PROFILE_ID}"
             fi
             
-            DELETE_TUNNEL_INFO=$(curl -s "$DELETE_URL" \
+            DELETE_TUNNEL_INFO=$(curl -s --connect-timeout 10 --max-time 30 "$DELETE_URL" \
               -X DELETE \
               -H "user-id: ${USER_ID}" \
               -H "workspace-id: ${WORKSPACE_ID}")
@@ -933,12 +955,14 @@ jobs:
           # Delete DNS record
           if [ -n "$FULL_HOSTNAME" ] && [ "$FULL_HOSTNAME" != "null" ]; then
             echo "Deleting DNS record for ${FULL_HOSTNAME}..."
-            EXISTING_DNS=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            EXISTING_DNS=$(curl -s --connect-timeout 10 --max-time 30 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
               "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records?name=${FULL_HOSTNAME}" \
               --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" | jq -r '.result[0].id // empty')
             
             if [ -n "$EXISTING_DNS" ]; then
-              DELETE_RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              DELETE_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
                 "https://api.cloudflare.com/client/v4/zones/${{ steps.config.outputs.cloudflare_zone_id }}/dns_records/${EXISTING_DNS}" \
                 --request DELETE \
                 --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
@@ -958,7 +982,8 @@ jobs:
           # Delete Cloudflare tunnel
           if [ -n "${{ steps.tunnel.outputs.tunnel_id }}" ] && [ "${{ steps.tunnel.outputs.tunnel_id }}" != "null" ]; then
             echo "Deleting Cloudflare tunnel ${{ steps.tunnel.outputs.tunnel_id }}..."
-            TUNNEL_DELETE_RESPONSE=$(curl -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            TUNNEL_DELETE_RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
               "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel/${{ steps.tunnel.outputs.tunnel_id }}" \
               --request DELETE \
               --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
