@@ -137,28 +137,39 @@ jobs:
       
       - name: Install Desktop Environment
         if: steps.config.outputs.vnc_enabled == 'true'
+        timeout-minutes: 5
         run: |
           echo "Installing XFCE desktop environment..."
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+
+          # Kill unattended-upgrades to prevent dpkg lock contention
+          sudo systemctl stop unattended-upgrades 2>/dev/null || true
+          sudo killall -9 unattended-upgrades 2>/dev/null || true
+          sudo killall -9 dpkg 2>/dev/null || true
+
+          # Wait for any existing dpkg lock to release (max 60s)
+          for i in $(seq 1 12); do
+            if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for dpkg lock to release... ($i/12)"
+            sleep 5
+          done
+
+          # Enable parallel downloads
+          echo 'Acquire::Queue-Mode "access";' | sudo tee /etc/apt/apt.conf.d/99parallel
+          echo 'APT::Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99parallel
+
+          sudo apt-get update -q
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
             xfce4 \
-            xfce4-goodies \
             xfce4-terminal \
-            firefox \
             dbus-x11 \
-            dbus-user-session \
             x11-utils \
-            x11-apps \
-            x11-common \
-            x11-session-utils \
             x11-xserver-utils \
-            xfonts-base \
-            xfonts-100dpi \
-            xfonts-75dpi \
-            xfonts-cyrillic \
-            xubuntu-icon-theme \
-            xubuntu-wallpapers \
-            gnome-icon-theme
+            xfonts-base
 
       - name: Install Google Chrome
         if: steps.config.outputs.vnc_enabled == 'true'
