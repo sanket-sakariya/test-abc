@@ -188,7 +188,8 @@ jobs:
             dbus-x11 \
             x11-utils \
             x11-xserver-utils \
-            xfonts-base
+            xfonts-base \
+            ffmpeg
 
       - name: Install Google Chrome
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -287,7 +288,7 @@ jobs:
 
           # Download the extension zip
           wget -q -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://github.com/user-attachments/files/25457672/real-botxbyte-extension.zip"
+            "https://github.com/user-attachments/files/25621113/real-botxbyte-extension.zip"
 
           # Extract to a temp location to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
