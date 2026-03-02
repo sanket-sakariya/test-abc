@@ -828,9 +828,6 @@ jobs:
               google-chrome \
                 --no-first-run \
                 --no-default-browser-check \
-                --disable-gpu \
-                --no-sandbox \
-                --disable-dev-shm-usage \
                 --user-data-dir="$PROFILE_DIR" \
                 2>/tmp/chrome-stderr.log &
               sleep 5
