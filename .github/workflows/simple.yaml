@@ -507,6 +507,19 @@ jobs:
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           echo "Installing cloudflared..."
+
+          # Release dpkg lock held by unattended-upgrades (may still be running
+          # on a fresh Ubuntu runner if the VNC Desktop Environment step was skipped)
+          sudo systemctl stop unattended-upgrades 2>/dev/null || true
+          sudo killall -9 unattended-upgrades 2>/dev/null || true
+          for i in $(seq 1 12); do
+            if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for dpkg lock to release... ($i/12)"
+            sleep 5
+          done
+
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
