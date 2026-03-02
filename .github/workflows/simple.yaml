@@ -970,7 +970,7 @@ jobs:
           echo "✅ VNC cleanup complete"
 
       - name: Upload Browser Profile to Wasabi
-        if: success() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
         timeout-minutes: 5
         env:
           AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
