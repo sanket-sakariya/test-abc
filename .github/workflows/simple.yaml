@@ -100,9 +100,9 @@ jobs:
             echo "✅ Webshare Config Loaded"
           fi
 
-          # Parse optional workflow_id for auto-task dispatch
-          WORKFLOW_ID=$(echo "$CONFIG" | jq -r '.workflow_id // ""')
-          echo "workflow_id=$WORKFLOW_ID" >> $GITHUB_OUTPUT
+          # Parse optional workflow_ids for auto-task dispatch (JSON array)
+          WORKFLOW_IDS=$(echo "$CONFIG" | jq -c '.workflow_ids // []')
+          echo "workflow_ids=$WORKFLOW_IDS" >> $GITHUB_OUTPUT
 
           echo "✅ Config Loaded:"
           echo "  VNC: $VNC_ENABLED"
@@ -696,7 +696,7 @@ jobs:
           WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
           BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
           CLOUDFLARE_TUNNEL_CREDENTIAL_ID="${{ steps.config.outputs.cloudflare_tunnel_credential_id }}"
-          WORKFLOW_ID="${{ steps.config.outputs.workflow_id }}"
+          WORKFLOW_IDS='${{ steps.config.outputs.workflow_ids }}'
 
           # Build base JSON body
           BODY="{
@@ -710,9 +710,9 @@ jobs:
             BODY="${BODY}, \"cloudflare_tunnel_credential_id\": \"${CLOUDFLARE_TUNNEL_CREDENTIAL_ID}\""
           fi
 
-          # Append optional workflow_id for auto-task dispatch
-          if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
-            BODY="${BODY}, \"workflow_id\": \"${WORKFLOW_ID}\""
+          # Append optional workflow_ids for auto-task dispatch (JSON array)
+          if [ -n "$WORKFLOW_IDS" ] && [ "$WORKFLOW_IDS" != "null" ] && [ "$WORKFLOW_IDS" != "[]" ]; then
+            BODY="${BODY}, \"workflow_ids\": ${WORKFLOW_IDS}"
           fi
 
           BODY="${BODY} }"
