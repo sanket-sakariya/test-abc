@@ -577,13 +577,13 @@ jobs:
                 \"ingress\": [
                   {
                     \"hostname\": \"${{ steps.config.outputs.hostname }}\",
-                    \"path\": \"/vnc/*\",
-                    \"service\": \"http://localhost:${NOVNC_PORT}\",
+                    \"path\": \"/(workflow|terminal|status|transcribe|profile|chrome).*\",
+                    \"service\": \"http://localhost:8766\",
                     \"originRequest\": {}
                   },
                   {
                     \"hostname\": \"${{ steps.config.outputs.hostname }}\",
-                    \"service\": \"http://localhost:8766\",
+                    \"service\": \"http://localhost:${NOVNC_PORT}\",
                     \"originRequest\": {}
                   },
                   {
