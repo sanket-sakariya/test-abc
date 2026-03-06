@@ -1,4 +1,6 @@
 services:
   hello:
-    image: hello-world
+    image: busybox
     container_name: hello-docker
+    command: sh -c "while true; do echo 'hello'; sleep 1; done"
+    restart: always
