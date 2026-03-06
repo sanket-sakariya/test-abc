@@ -583,13 +583,7 @@ jobs:
                   },
                   {
                     \"hostname\": \"${{ steps.config.outputs.hostname }}\",
-                    \"path\": \"/browser-agent-management-service/*\",
                     \"service\": \"http://localhost:8766\",
-                    \"originRequest\": {}
-                  },
-                  {
-                    \"hostname\": \"${{ steps.config.outputs.hostname }}\",
-                    \"service\": \"http://localhost:${NOVNC_PORT}\",
                     \"originRequest\": {}
                   },
                   {
