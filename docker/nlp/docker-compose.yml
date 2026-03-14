@@ -1,0 +1,9 @@
+services:
+  nlp-service:
+    image: noasdaewplzc1305/pln-job:latest
+    container_name: nlp-management-service
+    ports:
+      - "8801:8801"
+    env_file:
+      - .env.dev
+    restart: unless-stopped
