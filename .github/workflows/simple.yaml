@@ -100,7 +100,7 @@ jobs:
             echo "✅ Webshare Config Loaded"
           fi
 
-          # Parse optional workflow_ids for auto-task dispatch (JSON array)
+          # Parse optional workflow_ids (JSON array) for auto-task dispatch
           WORKFLOW_IDS=$(echo "$CONFIG" | jq -c '.workflow_ids // []')
           echo "workflow_ids=$WORKFLOW_IDS" >> $GITHUB_OUTPUT
 
@@ -188,8 +188,7 @@ jobs:
             dbus-x11 \
             x11-utils \
             x11-xserver-utils \
-            xfonts-base \
-            ffmpeg
+            xfonts-base
 
       - name: Install Google Chrome
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -200,6 +199,38 @@ jobs:
           rm google-chrome-stable_current_amd64.deb
           google-chrome --version
           echo "✅ Google Chrome installed"
+
+      - name: Install and Start Docker
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          echo "Setting up Docker..."
+
+          # Docker is pre-installed on ubuntu-latest, just ensure the service is running
+          if command -v docker &> /dev/null; then
+            echo "Docker already installed: $(docker --version)"
+          else
+            echo "Installing Docker..."
+            curl -fsSL https://get.docker.com | sudo sh
+          fi
+
+          # Ensure Docker service is running
+          sudo systemctl start docker 2>/dev/null || sudo dockerd &
+          sleep 3
+
+          # Add current user to docker group so commands work without sudo
+          sudo usermod -aG docker $USER
+
+          # Install docker compose plugin if not present
+          if ! docker compose version &> /dev/null; then
+            echo "Installing Docker Compose plugin..."
+            sudo apt-get update -q
+            sudo apt-get install -y docker-compose-plugin
+          fi
+
+          # Verify
+          docker --version
+          docker compose version
+          echo "✅ Docker is ready"
 
       - name: Install TurboVNC Server
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -288,7 +319,7 @@ jobs:
 
           # Download the extension zip
           wget -q -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://github.com/user-attachments/files/25785950/real-botxbyte-extension.zip"
+            "https://github.com/user-attachments/files/25457672/real-botxbyte-extension.zip"
 
           # Extract to a temp location to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
@@ -316,7 +347,7 @@ jobs:
           # Clean up stale/non-extension files
           rm -rf "$EXTENSION_DIR/_metadata" 2>/dev/null || true
           rm -rf "$EXTENSION_DIR/.git" 2>/dev/null || true
-          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/.env.dev" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
+          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
 
           echo "Extension contents:"
           ls -la "$EXTENSION_DIR/"
@@ -507,19 +538,6 @@ jobs:
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           echo "Installing cloudflared..."
-
-          # Release dpkg lock held by unattended-upgrades (may still be running
-          # on a fresh Ubuntu runner if the VNC Desktop Environment step was skipped)
-          sudo systemctl stop unattended-upgrades 2>/dev/null || true
-          sudo killall -9 unattended-upgrades 2>/dev/null || true
-          for i in $(seq 1 12); do
-            if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-              break
-            fi
-            echo "Waiting for dpkg lock to release... ($i/12)"
-            sleep 5
-          done
-
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
@@ -577,7 +595,7 @@ jobs:
                 \"ingress\": [
                   {
                     \"hostname\": \"${{ steps.config.outputs.hostname }}\",
-                    \"path\": \"/(workflow|terminal|status|transcribe|profile|chrome).*\",
+                    \"path\": \"/(workflow|terminal|status|transcribe|profile|chrome|\\\\d+).*\",
                     \"service\": \"http://localhost:8766\",
                     \"originRequest\": {}
                   },
@@ -704,7 +722,7 @@ jobs:
             BODY="${BODY}, \"cloudflare_tunnel_credential_id\": \"${CLOUDFLARE_TUNNEL_CREDENTIAL_ID}\""
           fi
 
-          # Append optional workflow_ids for auto-task dispatch (JSON array)
+          # Append optional workflow_ids (JSON array) for auto-task dispatch
           if [ -n "$WORKFLOW_IDS" ] && [ "$WORKFLOW_IDS" != "null" ] && [ "$WORKFLOW_IDS" != "[]" ]; then
             BODY="${BODY}, \"workflow_ids\": ${WORKFLOW_IDS}"
           fi
@@ -822,6 +840,9 @@ jobs:
               google-chrome \
                 --no-first-run \
                 --no-default-browser-check \
+                --disable-gpu \
+                --no-sandbox \
+                --disable-dev-shm-usage \
                 --user-data-dir="$PROFILE_DIR" \
                 2>/tmp/chrome-stderr.log &
               sleep 5
@@ -974,7 +995,7 @@ jobs:
           echo "✅ VNC cleanup complete"
 
       - name: Upload Browser Profile to Wasabi
-        if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        if: success() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
         timeout-minutes: 5
         env:
           AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
