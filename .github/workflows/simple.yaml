@@ -497,6 +497,7 @@ jobs:
           fi
 
           google-chrome \
+            --no-first-run \
             --user-data-dir="$PROFILE_DIR" \
             $CHROME_PROXY_FLAG \
             2>/tmp/chrome-stderr.log &
