@@ -1068,9 +1068,11 @@ jobs:
         if: always() && steps.config.outputs.vnc_enabled == 'true'
         timeout-minutes: 1
         run: |
-          echo "Disconnecting Tailscale..."
+          echo "Removing Tailscale..."
           sudo tailscale down || true
-          echo "✅ Tailscale disconnected"
+          sudo apt-get remove -y tailscale || true
+          sudo apt-get autoremove -y || true
+          echo "✅ Tailscale removed"
 
       - name: Cleanup VNC
         if: always() && steps.config.outputs.vnc_enabled == 'true'
