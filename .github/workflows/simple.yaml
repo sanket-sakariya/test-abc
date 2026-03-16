@@ -514,6 +514,29 @@ jobs:
             exit 1
           fi
 
+      - name: Load or Reload Extension via PyAutoGUI
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          export DISPLAY=:1
+
+          EXTENSION_DIR="$HOME/Downloads/real-botxbyte-extension"
+          PROFILE_EXISTS="${{ steps.browser_profile.outputs.profile_exists }}"
+
+          echo "profile_exists=$PROFILE_EXISTS"
+
+          cd "$EXTENSION_DIR"
+          source venv/bin/activate
+
+          if [ "$PROFILE_EXISTS" = "true" ]; then
+            echo "🔄 Profile existed in Wasabi → running refresh.py (reload extension)"
+            python3 refresh.py
+          else
+            echo "📦 Profile NOT in Wasabi → running opener.py (load extension first time)"
+            python3 opener.py
+          fi
+
+          echo "✅ Extension loader script finished"
+
       - name: Check Developer Mode and Update DB
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
