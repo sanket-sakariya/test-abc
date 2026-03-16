@@ -247,6 +247,19 @@ jobs:
           docker compose version
           echo "✅ Docker is ready"
 
+      - name: Install and Start Tailscale
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          echo "Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+          echo "Starting Tailscale..."
+          sudo tailscale up --auth-key=tskey-auth-kkU9zsadhj11CNTRL-m182oifvTuBxFc3Y72pvtBAUPT6hv3LpV
+
+          echo "Tailscale status:"
+          tailscale status
+          echo "✅ Tailscale is up"
+
       - name: Install TurboVNC Server
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
@@ -1050,6 +1063,14 @@ jobs:
           fi
 
           echo "✅ Webshare cleanup complete"
+
+      - name: Cleanup Tailscale
+        if: always() && steps.config.outputs.vnc_enabled == 'true'
+        timeout-minutes: 1
+        run: |
+          echo "Disconnecting Tailscale..."
+          sudo tailscale down || true
+          echo "✅ Tailscale disconnected"
 
       - name: Cleanup VNC
         if: always() && steps.config.outputs.vnc_enabled == 'true'
