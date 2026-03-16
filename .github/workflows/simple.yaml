@@ -149,7 +149,7 @@ jobs:
 
           # Register IP with Webshare
           RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
-            "https://proxy.webshare.io/api/v2/proxy/ipauthorization/" \
+            "https://proxy.webshare.io/api/v2/proxy/ipauthorization/?plan_id=12984667" \
             -X POST \
             -d "{\"ip_address\": \"$PUBLIC_IP\"}" \
             -H "Content-Type: application/json" \
