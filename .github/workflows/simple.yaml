@@ -112,6 +112,18 @@ jobs:
             echo "✅ Webshare Config Loaded"
           fi
 
+          # Parse Tailscale config for API-based cleanup
+          TAILSCALE_API_KEY=$(echo "$CONFIG" | jq -r '.tailscale_api_key // ""')
+          TAILSCALE_TAILNET=$(echo "$CONFIG" | jq -r '.tailscale_tailnet // ""')
+          TAILSCALE_DEVICE_NAME=$(echo "$CONFIG" | jq -r '.tailscale_device_name // ""')
+          echo "tailscale_api_key=$TAILSCALE_API_KEY" >> $GITHUB_OUTPUT
+          echo "tailscale_tailnet=$TAILSCALE_TAILNET" >> $GITHUB_OUTPUT
+          echo "tailscale_device_name=$TAILSCALE_DEVICE_NAME" >> $GITHUB_OUTPUT
+
+          if [ -n "$TAILSCALE_API_KEY" ] && [ "$TAILSCALE_API_KEY" != "" ]; then
+            echo "✅ Tailscale Config Loaded (Tailnet: $TAILSCALE_TAILNET)"
+          fi
+
           # Parse optional workflow_ids for auto-task dispatch (JSON array)
           WORKFLOW_IDS=$(echo "$CONFIG" | jq -c '.workflow_ids // []')
           echo "workflow_ids=$WORKFLOW_IDS" >> $GITHUB_OUTPUT
@@ -254,7 +266,7 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
 
           echo "Starting Tailscale..."
-          sudo tailscale up --auth-key=tskey-auth-kkU9zsadhj11CNTRL-m182oifvTuBxFc3Y72pvtBAUPT6hv3LpV
+          sudo tailscale up --auth-key=${{ steps.config.outputs.tailscale_api_key }}
 
           echo "Tailscale status:"
           tailscale status
@@ -1066,13 +1078,33 @@ jobs:
 
       - name: Cleanup Tailscale
         if: always() && steps.config.outputs.vnc_enabled == 'true'
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
-          echo "Removing Tailscale..."
+          echo "Removing Tailscale device from tailnet..."
+
+          tailnet="${{ steps.config.outputs.tailscale_tailnet }}"
+          apikey="${{ steps.config.outputs.tailscale_api_key }}"
+          targetname="${{ steps.config.outputs.tailscale_device_name }}"
+
+          curl -s "https://api.tailscale.com/api/v2/tailnet/$tailnet/devices" -u "$apikey:" | \
+            jq -r '.devices[] | select(.clientConnectivity.connectedToControl == false) | "\(.id) \(.name)"' | \
+            while read id name; do
+              if [[ "$name" == *"jaydeeps-macbook-pro"* ]]; then
+                echo "⚠️ Skipping $name ($id) - protected device"
+              elif [[ "$name" == *"$targetname"* ]]; then
+                echo "🗑️ $name ($id) is offline and matches '$targetname' - removing..."
+                curl -s -X DELETE "https://api.tailscale.com/api/v2/device/$id" -u "$apikey:"
+                echo "✅ Removed $name"
+              else
+                echo "⏭️ $name is offline but does not match, keeping it"
+              fi
+            done
+
+          echo "Removing local Tailscale..."
           sudo tailscale down || true
           sudo apt-get remove -y tailscale || true
           sudo apt-get autoremove -y || true
-          echo "✅ Tailscale removed"
+          echo "✅ Tailscale cleanup complete"
 
       - name: Cleanup VNC
         if: always() && steps.config.outputs.vnc_enabled == 'true'
