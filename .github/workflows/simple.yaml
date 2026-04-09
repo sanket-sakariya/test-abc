@@ -1356,9 +1356,39 @@ jobs:
             exit 0
           fi
 
-          echo "Zipping browser profile: $PROFILE_DIR"
-          echo "  Profile size before zip: $(du -sh "$PROFILE_DIR" | cut -f1)"
+          echo "Cleaning up browser profile cache files..."
+          echo "  Profile size before cleanup: $(du -sh "$PROFILE_DIR" | cut -f1)"
 
+          # Remove Chrome cache directories to reduce upload size
+          find "$PROFILE_DIR" -type d \( \
+            -name "Cache" \
+            -o -name "Code Cache" \
+            -o -name "GPUCache" \
+            -o -name "ShaderCache" \
+            -o -name "GrShaderCache" \
+            -o -name "CacheStorage" \
+            -o -name "ScriptCache" \
+            -o -name "Service Worker" \
+            -o -name "blob_storage" \
+            -o -name "IndexedDB" \
+            -o -name "Session Storage" \
+            -o -name "Crashpad" \
+            -o -name "BrowserMetrics" \
+          \) -exec rm -rf {} + 2>/dev/null || true
+
+          # Remove large temporary/log files
+          find "$PROFILE_DIR" -type f \( \
+            -name "*.log" \
+            -o -name "*.tmp" \
+            -o -name "LOG" \
+            -o -name "LOG.old" \
+            -o -name "LOCK" \
+            -o -name "TransportSecurity" \
+          \) -delete 2>/dev/null || true
+
+          echo "  Profile size after cleanup: $(du -sh "$PROFILE_DIR" | cut -f1)"
+
+          echo "Zipping browser profile: $PROFILE_DIR"
           cd "$HOME/browser-profiles"
           zip -r "/tmp/${BROWSER_PROFILE_ID}.zip" "${BROWSER_PROFILE_ID}/" -x "*/SingletonLock" "*/SingletonCookie" "*/SingletonSocket"
 
