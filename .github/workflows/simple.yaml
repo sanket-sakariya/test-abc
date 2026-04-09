@@ -231,6 +231,9 @@ jobs:
           echo 'Acquire::Queue-Mode "access";' | sudo tee /etc/apt/apt.conf.d/99parallel
           echo 'APT::Acquire::Retries "3";' | sudo tee -a /etc/apt/apt.conf.d/99parallel
 
+          # Use standard Ubuntu archive instead of Azure mirror
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
+
           sudo apt-get update -q
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
