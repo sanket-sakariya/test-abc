@@ -75,8 +75,19 @@ jobs:
             echo "  Browser Profile ID: $BROWSER_PROFILE_ID"
           fi
           
-          # Parse Wasabi S3
-          #credentials for browser profile persistence
+          # Parse GitHub repo info for profile storage (GitHub Releases)
+          GITHUB_REPO_NAME=$(echo "$CONFIG" | jq -r '.github_repo_name // ""')
+          GITHUB_OWNER=$(echo "$CONFIG" | jq -r '.github_owner // ""')
+          PROFILE_GITHUB_TOKEN=$(echo "$CONFIG" | jq -r '.github_token // ""')
+          echo "github_repo_name=$GITHUB_REPO_NAME" >> $GITHUB_OUTPUT
+          echo "github_owner=$GITHUB_OWNER" >> $GITHUB_OUTPUT
+          echo "profile_github_token=$PROFILE_GITHUB_TOKEN" >> $GITHUB_OUTPUT
+
+          if [ -n "$GITHUB_REPO_NAME" ] && [ "$GITHUB_REPO_NAME" != "" ]; then
+            echo "✅ GitHub Repo Config Loaded (${GITHUB_OWNER}/${GITHUB_REPO_NAME})"
+          fi
+
+          # Parse Wasabi S3 (legacy fallback)
           WASABI_ACCESS_KEY=$(echo "$CONFIG" | jq -r '.wasabi_access_key // ""')
           WASABI_SECRET_KEY=$(echo "$CONFIG" | jq -r '.wasabi_secret_key // ""')
           WASABI_BUCKET=$(echo "$CONFIG" | jq -r '.wasabi_bucket // ""')
@@ -571,11 +582,13 @@ jobs:
         if: steps.config.outputs.vnc_enabled == 'true'
         id: browser_profile
         env:
+          GH_TOKEN: ${{ steps.config.outputs.profile_github_token }}
           AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
           AWS_SECRET_ACCESS_KEY: ${{ steps.config.outputs.wasabi_secret_key }}
           AWS_DEFAULT_REGION: ${{ steps.config.outputs.wasabi_region }}
         run: |
           BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          GITHUB_REPO="${{ steps.config.outputs.github_owner }}/${{ steps.config.outputs.github_repo_name }}"
           WASABI_BUCKET="${{ steps.config.outputs.wasabi_bucket }}"
           WASABI_ENDPOINT="${{ steps.config.outputs.wasabi_endpoint }}"
           PROFILE_DIR="$HOME/browser-profiles/${BROWSER_PROFILE_ID}"
@@ -584,83 +597,68 @@ jobs:
           echo "browser_profile_dir=$PROFILE_DIR" >> $GITHUB_OUTPUT
 
           mkdir -p "$HOME/browser-profiles"
-
-          # Best-effort step: never let any aws / unzip / awk failure abort
-          # the workflow. We always end up either with the downloaded
-          # profile OR a fresh empty one — both are valid.
           set +e
 
           PROFILE_EXISTS="false"
-
-          # Maximum size of an existing Wasabi profile that we will pull down
-          # at start. Anything bigger is considered "polluted" (cache crud /
-          # extension databases the cleanup step couldn't trim). We delete it
-          # from Wasabi and start fresh with the same UUID — we do NOT
-          # download a >500 MB profile under any circumstance.
           MAX_PROFILE_BYTES=524288000  # 500 MB
 
-          # Check if browser profile exists in Wasabi
-          if [ -n "$WASABI_BUCKET" ] && [ -n "$BROWSER_PROFILE_ID" ]; then
-            echo "Checking Wasabi for existing browser profile: $WASABI_KEY"
+          # === PRIMARY: Download from GitHub Release ===
+          if [ -n "$GITHUB_REPO" ] && [ "$GITHUB_REPO" != "/" ] && [ -n "$GH_TOKEN" ]; then
+            echo "Checking GitHub Release for existing browser profile..."
 
-            # `aws s3 ls` exits 1 when the key is missing. Capture stdout
-            # and ignore the exit code so an absent profile doesn't kill
-            # the step (the previous version did `LS_OUTPUT=$(aws ...)`
-            # which under `bash -e` propagated that exit-1 and aborted
-            # the whole job — that's the "exit code 1" you were seeing
-            # right after the "Checking Wasabi..." log line).
-            LS_OUTPUT="$(aws s3 ls "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT" 2>/dev/null || true)"
+            if gh release download browser-profile -p "profile.zip" -D /tmp/ -R "$GITHUB_REPO" 2>/dev/null; then
+              ZIP_SIZE=$(stat -c%s /tmp/profile.zip 2>/dev/null || echo 0)
+              ZIP_MB=$((ZIP_SIZE / 1024 / 1024))
+              echo "  Downloaded profile.zip from GitHub Release: ${ZIP_MB} MB"
 
-            if [ -n "$LS_OUTPUT" ]; then
-              # `aws s3 ls` columns: date time size key
-              EXISTING_BYTES="$(printf '%s\n' "$LS_OUTPUT" | awk 'NR==1 {print $3}')"
-              # Only keep digits; defend against non-numeric output
-              # (error messages, unexpected formats) that would crash
-              # the arithmetic below.
-              case "$EXISTING_BYTES" in
-                ''|*[!0-9]*) EXISTING_BYTES=0 ;;
-              esac
-              EXISTING_MB=$(( EXISTING_BYTES / 1024 / 1024 ))
-              echo "  Existing Wasabi profile size: ${EXISTING_MB} MB (${EXISTING_BYTES} bytes)"
-
-              if [ "$EXISTING_BYTES" -gt "$MAX_PROFILE_BYTES" ]; then
-                LIMIT_MB=$(( MAX_PROFILE_BYTES / 1024 / 1024 ))
-                echo "⚠️ Existing profile exceeds ${LIMIT_MB} MB limit — deleting from Wasabi and starting fresh (no download)"
-                aws s3 rm "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT" || echo "⚠️ Wasabi delete failed (ignored)"
-                PROFILE_EXISTS="false"
+              if [ "$ZIP_SIZE" -gt "$MAX_PROFILE_BYTES" ]; then
+                echo "⚠️ Profile > 500 MB — deleting release asset and starting fresh"
+                gh release delete-asset browser-profile profile.zip -R "$GITHUB_REPO" -y 2>/dev/null || true
+                rm -f /tmp/profile.zip
               else
-                echo "✅ Browser profile within size limit — downloading..."
-
-                if aws s3 cp "s3://${WASABI_BUCKET}/${WASABI_KEY}" "/tmp/${BROWSER_PROFILE_ID}.zip" --endpoint-url "$WASABI_ENDPOINT"; then
-                  echo "Extracting browser profile..."
-                  if unzip -o "/tmp/${BROWSER_PROFILE_ID}.zip" -d "$HOME/browser-profiles/" >/dev/null; then
-                    rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
-                    if [ -d "$PROFILE_DIR" ]; then
-                      echo "✅ Browser profile extracted to: $PROFILE_DIR"
-                      echo "  Profile size: $(du -sh "$PROFILE_DIR" 2>/dev/null | cut -f1)"
-                      PROFILE_EXISTS="true"
-                    else
-                      echo "⚠️ Extraction did not produce expected directory, creating fresh profile"
-                      PROFILE_EXISTS="false"
-                    fi
-                  else
-                    echo "⚠️ Unzip failed, creating fresh profile"
-                    rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
-                    PROFILE_EXISTS="false"
+                if unzip -o /tmp/profile.zip -d "$HOME/browser-profiles/" >/dev/null 2>&1; then
+                  rm -f /tmp/profile.zip
+                  if [ -d "$PROFILE_DIR" ]; then
+                    echo "✅ Browser profile extracted from GitHub Release"
+                    echo "  Profile size: $(du -sh "$PROFILE_DIR" 2>/dev/null | cut -f1)"
+                    PROFILE_EXISTS="true"
                   fi
                 else
-                  echo "⚠️ Wasabi download failed, creating fresh profile"
-                  PROFILE_EXISTS="false"
+                  echo "⚠️ Unzip failed"
+                  rm -f /tmp/profile.zip
                 fi
               fi
             else
-              echo "No existing browser profile found in Wasabi"
+              echo "No profile found in GitHub Release"
             fi
-          else
-            echo "⚠️ Wasabi not configured or no browser_profile_id, using fresh profile"
           fi
 
-          # If no usable profile was downloaded, create a fresh one
+          # === FALLBACK: Download from Wasabi (legacy) ===
+          if [ "$PROFILE_EXISTS" = "false" ] && [ -n "$WASABI_BUCKET" ] && [ -n "$BROWSER_PROFILE_ID" ] && [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            echo "Checking Wasabi for existing browser profile (fallback)..."
+            LS_OUTPUT="$(aws s3 ls "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT" 2>/dev/null || true)"
+
+            if [ -n "$LS_OUTPUT" ]; then
+              EXISTING_BYTES="$(printf '%s\n' "$LS_OUTPUT" | awk 'NR==1 {print $3}')"
+              case "$EXISTING_BYTES" in
+                ''|*[!0-9]*) EXISTING_BYTES=0 ;;
+              esac
+
+              if [ "$EXISTING_BYTES" -le "$MAX_PROFILE_BYTES" ] && [ "$EXISTING_BYTES" -gt 0 ]; then
+                if aws s3 cp "s3://${WASABI_BUCKET}/${WASABI_KEY}" "/tmp/${BROWSER_PROFILE_ID}.zip" --endpoint-url "$WASABI_ENDPOINT" 2>/dev/null; then
+                  if unzip -o "/tmp/${BROWSER_PROFILE_ID}.zip" -d "$HOME/browser-profiles/" >/dev/null 2>&1; then
+                    rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
+                    if [ -d "$PROFILE_DIR" ]; then
+                      echo "✅ Browser profile extracted from Wasabi (fallback)"
+                      PROFILE_EXISTS="true"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          fi
+
+          # === FRESH PROFILE if nothing downloaded ===
           if [ "$PROFILE_EXISTS" = "false" ]; then
             echo "Creating fresh browser profile: $PROFILE_DIR"
             rm -rf "$PROFILE_DIR"
@@ -671,7 +669,6 @@ jobs:
           echo "profile_exists=$PROFILE_EXISTS" >> $GITHUB_OUTPUT
           echo "Browser Profile ID: $BROWSER_PROFILE_ID"
           echo "Profile Directory: $PROFILE_DIR"
-          # Always succeed — a fresh profile is a valid outcome.
           exit 0
 
       - name: Open Chrome on Desktop
@@ -907,17 +904,61 @@ jobs:
               \"name\": \"${TUNNEL_NAME}\",
               \"config_src\": \"cloudflare\"
             }")
-          
+
           # Check if tunnel creation was successful
           SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
           if [ "$SUCCESS" != "true" ]; then
-            echo "❌ Failed to create tunnel"
+            echo "⚠️ Tunnel creation failed, checking if tunnel already exists..."
             echo "$RESPONSE" | jq '.'
-            exit 1
+
+            # If create failed (usually duplicate name), try to reuse the existing tunnel
+            EXISTING=$(curl -s --connect-timeout 10 --max-time 30 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" \
+              --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
+
+            EXISTING_ID=$(echo "$EXISTING" | jq -r '.result[0].id // empty')
+            if [ -n "$EXISTING_ID" ]; then
+              echo "✅ Reusing existing tunnel: $EXISTING_ID"
+
+              # Clean up old connections so cloudflared can reconnect
+              curl -s --connect-timeout 10 --max-time 30 \
+                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel/${EXISTING_ID}/connections" \
+                --request DELETE \
+                --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}" || true
+              sleep 2
+
+              # Get a fresh token for the existing tunnel
+              TOKEN_RESP=$(curl -s --connect-timeout 10 --max-time 30 \
+                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                "https://api.cloudflare.com/client/v4/accounts/${{ steps.config.outputs.cloudflare_account_id }}/cfd_tunnel/${EXISTING_ID}/token" \
+                --header "Authorization: Bearer ${{ steps.config.outputs.cloudflare_api_token }}")
+              EXISTING_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.result // empty')
+
+              if [ -n "$EXISTING_TOKEN" ] && [ "$EXISTING_TOKEN" != "null" ]; then
+                RESPONSE="$EXISTING"
+                SUCCESS="true"
+              else
+                echo "❌ Failed to get token for existing tunnel"
+                echo "$TOKEN_RESP" | jq '.'
+                exit 1
+              fi
+            else
+              echo "❌ Failed to create tunnel and no existing tunnel found"
+              exit 1
+            fi
           fi
-          
-          TUNNEL_ID=$(echo "$RESPONSE" | jq -r '.result.id')
-          TUNNEL_TOKEN=$(echo "$RESPONSE" | jq -r '.result.token')
+
+          if [ "$SUCCESS" = "true" ]; then
+            # Try from create response first, fall back to existing tunnel lookup
+            TUNNEL_ID=$(echo "$RESPONSE" | jq -r '.result.id // .result[0].id // empty')
+            TUNNEL_TOKEN=$(echo "$RESPONSE" | jq -r '.result.token // empty')
+            # If token came from the /token endpoint (existing tunnel reuse)
+            if [ -z "$TUNNEL_TOKEN" ] || [ "$TUNNEL_TOKEN" = "null" ]; then
+              TUNNEL_TOKEN="${EXISTING_TOKEN:-}"
+            fi
+          fi
           
           if [ -z "$TUNNEL_ID" ] || [ "$TUNNEL_ID" = "null" ]; then
             echo "❌ Failed to extract tunnel ID"
@@ -1382,24 +1423,18 @@ jobs:
         if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
         timeout-minutes: 5
         env:
+          GH_TOKEN: ${{ steps.config.outputs.profile_github_token }}
           AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
           AWS_SECRET_ACCESS_KEY: ${{ steps.config.outputs.wasabi_secret_key }}
           AWS_DEFAULT_REGION: ${{ steps.config.outputs.wasabi_region }}
         run: |
-          echo "Uploading browser profile to Wasabi..."
+          echo "Uploading browser profile..."
 
           BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          GITHUB_REPO="${{ steps.config.outputs.github_owner }}/${{ steps.config.outputs.github_repo_name }}"
           WASABI_BUCKET="${{ steps.config.outputs.wasabi_bucket }}"
           WASABI_ENDPOINT="${{ steps.config.outputs.wasabi_endpoint }}"
           PROFILE_DIR="$HOME/browser-profiles/${BROWSER_PROFILE_ID}"
-          WASABI_KEY="browser-profiles/${BROWSER_PROFILE_ID}.zip"
-
-          # Debug: verify credentials are available
-          echo "  AWS_ACCESS_KEY_ID set: $([ -n "$AWS_ACCESS_KEY_ID" ] && echo 'yes' || echo 'no')"
-          echo "  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION"
-          echo "  Wasabi Endpoint: $WASABI_ENDPOINT"
-          echo "  Wasabi Bucket: $WASABI_BUCKET"
-          echo "  Browser Profile ID: $BROWSER_PROFILE_ID"
 
           if [ -z "$BROWSER_PROFILE_ID" ] || [ "$BROWSER_PROFILE_ID" = "" ]; then
             echo "⚠️ No browser_profile_id, skipping upload"
@@ -1408,7 +1443,6 @@ jobs:
 
           if [ ! -d "$PROFILE_DIR" ]; then
             echo "⚠️ Browser profile directory not found: $PROFILE_DIR, skipping upload"
-            ls -la "$HOME/browser-profiles/" 2>/dev/null || echo "  browser-profiles dir does not exist"
             exit 0
           fi
 
@@ -1444,39 +1478,52 @@ jobs:
 
           echo "  Profile size after cleanup: $(du -sh "$PROFILE_DIR" | cut -f1)"
 
-          # Hard size cap. If the profile is still bigger than this after cache
-          # cleanup, treat it as polluted and DON'T upload it back. We also
-          # delete any existing object so the next start does not pull a stale
-          # oversized snapshot. The next run starts fresh with the same UUID.
+          # Hard size cap
           MAX_PROFILE_BYTES=524288000  # 500 MB
           PROFILE_BYTES=$(du -sb "$PROFILE_DIR" | cut -f1)
           PROFILE_MB=$((PROFILE_BYTES / 1024 / 1024))
-          echo "  Profile size after cleanup: ${PROFILE_MB} MB (${PROFILE_BYTES} bytes)"
 
           if [ "$PROFILE_BYTES" -gt "$MAX_PROFILE_BYTES" ] 2>/dev/null; then
-            echo "❌ Profile is still > $((MAX_PROFILE_BYTES / 1024 / 1024)) MB after cleanup — skipping upload"
-            echo "   Deleting any existing Wasabi object so the next session starts fresh: s3://${WASABI_BUCKET}/${WASABI_KEY}"
-            aws s3 rm "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT" || true
+            echo "❌ Profile is still > 500 MB after cleanup — skipping upload"
             exit 0
           fi
 
-          echo "Zipping browser profile: $PROFILE_DIR"
+          echo "Zipping browser profile..."
           cd "$HOME/browser-profiles"
-          zip -r "/tmp/${BROWSER_PROFILE_ID}.zip" "${BROWSER_PROFILE_ID}/" -x "*/SingletonLock" "*/SingletonCookie" "*/SingletonSocket"
+          zip -r "/tmp/profile.zip" "${BROWSER_PROFILE_ID}/" -x "*/SingletonLock" "*/SingletonCookie" "*/SingletonSocket"
 
-          ZIP_SIZE=$(du -sh "/tmp/${BROWSER_PROFILE_ID}.zip" | cut -f1)
+          ZIP_SIZE=$(du -sh "/tmp/profile.zip" | cut -f1)
           echo "  Zip size: $ZIP_SIZE"
 
-          echo "Uploading to Wasabi: s3://${WASABI_BUCKET}/${WASABI_KEY}"
-          aws s3 cp "/tmp/${BROWSER_PROFILE_ID}.zip" "s3://${WASABI_BUCKET}/${WASABI_KEY}" \
-            --endpoint-url "$WASABI_ENDPOINT"
+          # === PRIMARY: Upload to GitHub Release ===
+          UPLOAD_SUCCESS="false"
+          if [ -n "$GITHUB_REPO" ] && [ "$GITHUB_REPO" != "/" ] && [ -n "$GH_TOKEN" ]; then
+            echo "Uploading to GitHub Release: $GITHUB_REPO"
 
-          echo "✅ Browser profile uploaded to Wasabi successfully"
-          echo "  Bucket: $WASABI_BUCKET"
-          echo "  Key: $WASABI_KEY"
-          echo "  Size: $ZIP_SIZE"
+            # Create release if not exists
+            gh release create browser-profile --title "Browser Profile" --notes "Auto-managed browser profile storage" -R "$GITHUB_REPO" 2>/dev/null || true
 
-          rm -f "/tmp/${BROWSER_PROFILE_ID}.zip"
+            # Upload (overwrite existing asset)
+            if gh release upload browser-profile /tmp/profile.zip --clobber -R "$GITHUB_REPO" 2>/dev/null; then
+              echo "✅ Browser profile uploaded to GitHub Release"
+              UPLOAD_SUCCESS="true"
+            else
+              echo "⚠️ GitHub Release upload failed, trying Wasabi fallback..."
+            fi
+          fi
+
+          # === FALLBACK: Upload to Wasabi ===
+          if [ "$UPLOAD_SUCCESS" = "false" ] && [ -n "$WASABI_BUCKET" ] && [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            WASABI_KEY="browser-profiles/${BROWSER_PROFILE_ID}.zip"
+            echo "Uploading to Wasabi (fallback): s3://${WASABI_BUCKET}/${WASABI_KEY}"
+            if aws s3 cp "/tmp/profile.zip" "s3://${WASABI_BUCKET}/${WASABI_KEY}" --endpoint-url "$WASABI_ENDPOINT"; then
+              echo "✅ Browser profile uploaded to Wasabi"
+            else
+              echo "⚠️ Wasabi upload also failed"
+            fi
+          fi
+
+          rm -f "/tmp/profile.zip"
 
       - name: Trigger Auto-Restart
         if: always() && steps.config.outputs.vnc_enabled == 'true'
