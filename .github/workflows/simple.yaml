@@ -698,13 +698,15 @@ jobs:
           USER_ID="${{ steps.config.outputs.user_id }}"
           WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
 
-          # Search for "developer_mode":true in the browser profile preferences
+          # Search for "developer_mode" in the browser profile preferences
+          # Chrome stores developer_mode as an encrypted/hashed string, not a boolean
+          # The presence of the key means developer mode was enabled
           IS_CHROME_EXTENSION="false"
-          if grep -rq '"developer_mode":true' "$PROFILE_DIR/" 2>/dev/null; then
+          if grep -rq '"developer_mode"' "$PROFILE_DIR/" 2>/dev/null; then
             IS_CHROME_EXTENSION="true"
-            echo "✅ developer_mode is TRUE → setting is_chrome_extension=true"
+            echo "✅ developer_mode key found → setting is_chrome_extension=true"
           else
-            echo "ℹ️ developer_mode is not true (or not found) → is_chrome_extension=false"
+            echo "ℹ️ developer_mode key not found → is_chrome_extension=false"
           fi
 
           echo "is_chrome_extension: $IS_CHROME_EXTENSION"
