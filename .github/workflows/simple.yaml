@@ -863,6 +863,89 @@ jobs:
             echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
           fi
 
+      # ──────────────────────────────────────────────────────────────────
+      # Self-report runtime flag: workflow is up, tunnel is live.
+      # This is the *atomic* source of truth — it writes directly to
+      # Redis via the /flag/active endpoint and pushes the profile into
+      # the pool ZSET. Decoupled from the legacy tunnel-info create call
+      # above so a single failure here can't leave the pool inconsistent.
+      # ──────────────────────────────────────────────────────────────────
+      - name: Flag Runtime Active (Redis pool registration)
+        if: steps.config.outputs.cloudflare_enabled == 'true'
+        run: |
+          BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
+          FULL_HOSTNAME="${{ steps.config.outputs.hostname }}"
+          TUNNEL_URL="https://${FULL_HOSTNAME}"
+          WORKFLOW_RUN_ID="${{ github.run_id }}"
+
+          BODY=$(jq -nc \
+            --arg pid "$BROWSER_PROFILE_ID" \
+            --arg ws  "$WORKSPACE_ID" \
+            --arg wf  "$WORKFLOW_RUN_ID" \
+            --arg url "$TUNNEL_URL" \
+            '{profile_id:$pid, workspace_id:$ws, workflow_run_id:$wf, tunnel_url:$url}')
+
+          # Up to 3 quick attempts — endpoint is purely a Redis Lua write so
+          # successes are <50ms; retries cover transient APISIX flips only.
+          for attempt in 1 2 3; do
+            CODE=$(curl -s -o /tmp/flag_active.json -w "%{http_code}" \
+              --connect-timeout 5 --max-time 15 \
+              "http://159.203.158.168/ai-management-service/api/v1/browser-profile/flag/active" \
+              -X POST -H "Content-Type: application/json" -d "$BODY") || CODE=000
+            if [ "$CODE" = "200" ]; then
+              echo "✅ Flag active set (attempt ${attempt}): $(cat /tmp/flag_active.json)"
+              break
+            fi
+            echo "⚠️ flag/active attempt ${attempt} -> HTTP ${CODE}"
+            cat /tmp/flag_active.json 2>/dev/null || true
+            sleep 2
+          done
+
+      # ──────────────────────────────────────────────────────────────────
+      # Install EXIT trap: regardless of how this job ends (success,
+      # failure, cancel, timeout), the next post-job step will fire
+      # /flag/inactive. We install the trap as a tiny script written to
+      # disk so any subsequent `bash -c` step can re-source it if needed,
+      # but the authoritative cleanup is the "Flag Runtime Inactive"
+      # always() step at the end of this job.
+      # ──────────────────────────────────────────────────────────────────
+      - name: Install runtime-flag cleanup script
+        if: steps.config.outputs.cloudflare_enabled == 'true'
+        run: |
+          mkdir -p /tmp/runtime-flag
+          cat > /tmp/runtime-flag/inactive.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          # Best-effort: never fail the workflow on cleanup errors.
+          set +e
+          BROWSER_PROFILE_ID="$1"
+          WORKSPACE_ID="$2"
+          WORKFLOW_RUN_ID="$3"
+          REASON="${4:-unknown}"
+          [ -z "$BROWSER_PROFILE_ID" ] && exit 0
+          BODY=$(jq -nc \
+            --arg pid "$BROWSER_PROFILE_ID" \
+            --arg ws  "$WORKSPACE_ID" \
+            --arg wf  "$WORKFLOW_RUN_ID" \
+            --arg rs  "$REASON" \
+            '{profile_id:$pid, workspace_id:$ws, workflow_run_id:$wf, reason:$rs}')
+          for attempt in 1 2 3; do
+            CODE=$(curl -s -o /tmp/flag_inactive.json -w "%{http_code}" \
+              --connect-timeout 5 --max-time 15 \
+              "http://159.203.158.168/ai-management-service/api/v1/browser-profile/flag/inactive" \
+              -X POST -H "Content-Type: application/json" -d "$BODY") || CODE=000
+            if [ "$CODE" = "200" ]; then
+              echo "✅ flag/inactive sent (attempt ${attempt}, reason=${REASON})"
+              exit 0
+            fi
+            echo "⚠️ flag/inactive attempt ${attempt} -> HTTP ${CODE}"
+            sleep 2
+          done
+          exit 0
+          SCRIPT
+          chmod +x /tmp/runtime-flag/inactive.sh
+          echo "✅ Cleanup script installed at /tmp/runtime-flag/inactive.sh"
+
       - name: Display VNC Connection Info
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
@@ -1199,3 +1282,20 @@ jobs:
           rm -f "/tmp/profile.zip"
 
     
+      # ──────────────────────────────────────────────────────────────────
+      # FINAL: Flag runtime inactive — always() runs on success, failure,
+      # AND cancel, so this is our durable EXIT trap. The endpoint is
+      # idempotent and workflow_run_id-guarded so even if a stale callback
+      # arrives later it cannot evict a fresh run.
+      # ──────────────────────────────────────────────────────────────────
+      - name: Flag Runtime Inactive (atomic pool eviction)
+        if: always() && steps.config.outputs.cloudflare_enabled == 'true'
+        run: |
+          REASON="success"
+          if [ "${{ job.status }}" = "failure" ]; then REASON="failure"; fi
+          if [ "${{ job.status }}" = "cancelled" ]; then REASON="cancelled"; fi
+          /tmp/runtime-flag/inactive.sh \
+            "${{ steps.config.outputs.browser_profile_id }}" \
+            "${{ steps.config.outputs.workspace_id }}" \
+            "${{ github.run_id }}" \
+            "$REASON" || true
